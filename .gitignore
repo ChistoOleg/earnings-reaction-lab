@@ -1,0 +1,8 @@
+.env
+data/
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+*.egg-info/
+.DS_Store

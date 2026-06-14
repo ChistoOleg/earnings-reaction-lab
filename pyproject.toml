@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "earnings-reaction-lab"
+version = "0.1.0"
+description = "Why do identical earnings beats produce different price reactions? Event study, double-selection lasso, causal forests, gradient boosting, and transcript NLP on S&P 500 earnings events."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pandas>=2.1",
+    "pyarrow>=15",
+    "httpx>=0.27,<1",
+    "pydantic-settings>=2.2,<3",
+    "statsmodels>=0.14",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.3",
+    "shap>=0.45",
+    "optuna>=3.6",
+    "doubleml>=0.8",
+    "econml>=0.15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+gpu = ["torch>=2.2", "transformers>=4.40", "accelerate>=0.29"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
