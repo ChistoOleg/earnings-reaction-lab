@@ -13,10 +13,78 @@ The repository is built so that each method appears only where its assumptions e
 keep, and the inference/prediction distinction is kept explicit throughout. The methodology
 is the deliverable as much as any single number.
 
-> **Status:** full analytical pipeline implemented and unit-tested (47 tests, simulation
-> ground-truths for every estimator). Headline empirical numbers are produced by running
-> the pipeline against FMP data — see *Reproducing the results*. Results sections below are
-> intentionally left as the structure to fill from `notebooks/06_findings`.
+> **Status:** analytical pipeline implemented and unit-tested (51 tests, simulation
+> ground-truths for every estimator) and run end-to-end on live data. The **Results**
+> section below reports a pilot run on a curated 84-name S&P 500 subset over ~5 years
+> (~1,845 earnings events, current-membership snapshot — see caveats).
+
+## Results (pilot run)
+
+Pilot scope: 84 diversified S&P 500 names, ~5 years, **1,845 earnings events**. Reactions
+are market-adjusted cumulative abnormal returns over the announcement window (days 0–1).
+This is a current-membership snapshot, so survivorship bias applies (see *Data*); treat it
+as a strong pilot, not the final study.
+
+### The puzzle, visualized
+
+Surprise size alone does not determine the reaction — the cloud is wide and roughly
+centered, exactly the dispersion the project sets out to explain.
+
+![Reaction vs surprise](reports/02_surprise_vs_reaction.png)
+
+### Reaction scales with surprise, but mainly at the tails
+
+Sorting events into surprise (SUE) quintiles, the largest-beat quintile is significantly
+positive (~+0.95%, CI clear of zero) and the largest-miss quintile is negative; the middle
+is noisy. The relationship is real but concentrated in the extremes.
+
+![Reaction by surprise quintile](reports/01_car_by_sue_quintile.png)
+
+### Post-earnings drift is strongly asymmetric
+
+Beats settle around +0.5% and hold it; misses fall to roughly −2.5% and only partially
+recover, sitting near −1.5% three weeks later. **Misses are punished several times harder
+than beats are rewarded, and the drift persists** — a clean post-earnings-announcement-drift
+result.
+
+![Drift around earnings](reports/04_drift_beats_vs_misses.png)
+
+### Which conditions move the reaction (the core finding)
+
+A causal forest (CausalForestDML, cluster-aware cross-fitting) estimates how the reaction's
+*sensitivity to surprise* varies with prior conditions. Three moderators are significant:
+
+- **Pre-earnings run-up (20-day) — negative.** Stocks that already rallied into the print
+  react *less* favorably to the same beat: the move was priced in. This is the statistical
+  articulation of *why a company can beat and still fall* (the "Meta" case).
+- **12-month momentum — positive (largest).** Longer-horizon winners react more strongly.
+- **Market-cap decile — positive.** Larger caps reprice more per unit of surprise.
+
+Short-term run-up dampens the reaction while long-term momentum amplifies it — two horizons
+pulling in opposite directions.
+
+![Causal-forest moderators](reports/07_forest_moderators.png)
+
+### You can explain the reaction, but not predict its magnitude
+
+A gradient-boosted model under purged, embargoed walk-forward CV shows essentially no
+out-of-sample skill at predicting reaction *magnitude*: predictions collapse toward zero
+while actuals span ±15%, and SHAP attributes nearly all signal to the surprise itself.
+
+![Out-of-sample predicted vs actual](reports/05_oos_predicted_vs_actual.png)
+
+This is an honest null, and the central methodological point: the cross-sectional reaction
+is **explainable in its structure (inference) but not point-predictable (prediction)** —
+consistent with market efficiency, and a more credible result than an overfit "winning"
+model.
+
+### Caveats
+
+Curated 84-name universe over ~5 years on a current-membership snapshot (survivorship bias
+present), annual-only fundamentals on the data tier used (so the valuation moderator is
+under-powered), and no transcript-text features yet. Effect magnitudes are modest and
+should be read as directional pilot evidence; the full point-in-time, deeper-history run is
+the natural next step.
 
 ## The approach in one picture
 
@@ -72,9 +140,14 @@ tests/                 47 tests; estimators verified against simulated ground tr
 ## Data
 
 Primary source: **Financial Modeling Prep (FMP)**, with `yfinance` as a free price
-cross-check. Survivorship bias is handled properly via FMP's historical S&P 500
-constituents endpoint — the universe is reconstructed point-in-time, including names that
-later left the index.
+cross-check. The pipeline adapts the universe to your plan: it first attempts
+**point-in-time** S&P 500 membership via FMP's historical-constituents endpoint (the
+proper survivorship fix, including names that later left the index); if that endpoint
+is not in your plan, it falls back to the **current** constituents, and failing that to
+a curated diversified subset. The current-membership and subset paths carry
+**survivorship bias** (they only include today's members), which is logged at run time
+and should be stated in any write-up based on them. Point-in-time membership requires a
+plan that includes historical constituents (e.g. Premium).
 
 The project is designed around a **phased data budget**:
 
