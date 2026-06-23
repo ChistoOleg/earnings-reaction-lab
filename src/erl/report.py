@@ -146,5 +146,22 @@ def make_figures(
         except Exception as exc:
             logger.warning("forest figure skipped: %s", exc)
 
+    # 8. Out-of-sample comparison: ML vs linear baselines (if available)
+    cmp_csv = Path(processed_dir) / "prediction_comparison.csv"
+    if cmp_csv.exists():
+        try:
+            t = pd.read_csv(cmp_csv)
+            fig, ax = plt.subplots(figsize=(6.5, 4))
+            bars = ax.bar(t["model"], t["rank_ic"], color=[GREY, GREY, BLUE][: len(t)])
+            ax.axhline(0, color=GREY, lw=0.8)
+            ax.set_ylabel("Out-of-sample rank IC")
+            ax.set_title("Does ML beat a linear baseline? (same fold, same metric)")
+            for bar, val in zip(bars, t["rank_ic"]):
+                ax.text(bar.get_x() + bar.get_width() / 2, val, f"{val:.3f}",
+                        ha="center", va="bottom" if val >= 0 else "top", fontsize=9)
+            written.append(_save(fig, figdir / "08_model_comparison.png"))
+        except Exception as exc:
+            logger.warning("model comparison figure skipped: %s", exc)
+
     logger.info("wrote %d figures to %s", len(written), figdir)
     return written

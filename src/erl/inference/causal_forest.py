@@ -70,10 +70,14 @@ def fit_causal_forest(
     cate = np.asarray(estimator.effect(X)).ravel()
     ate = float(cate.mean())
 
-    blp = best_linear_projection(cate, frame[moderators])
-    calibration = cate_sort_test(frame, cate, outcome, treatment, controls)
+    blp = best_linear_projection(cate, frame[moderators], groups=groups)
+    calibration = cate_sort_test(frame, cate, outcome, treatment, controls, cluster=cluster)
     logger.info(
-        "causal forest fit: n=%d, ate=%.5f, cate sd=%.5f", len(frame), ate, cate.std()
+        "causal forest fit: n=%d, ate=%.5f, cate sd=%.5f, BLP SEs=%s",
+        len(frame),
+        ate,
+        cate.std(),
+        blp.attrs.get("cov_type", "HC1"),
     )
     return ForestResult(
         ate=ate,
@@ -86,14 +90,25 @@ def fit_causal_forest(
     )
 
 
-def best_linear_projection(cate: np.ndarray, moderators: pd.DataFrame) -> pd.DataFrame:
+def best_linear_projection(
+    cate: np.ndarray, moderators: pd.DataFrame, groups: np.ndarray | None = None
+) -> pd.DataFrame:
+    """Project estimated CATEs on standardized moderators. Standard errors are
+    cluster-robust by firm when ``groups`` is supplied (the panel has within-firm
+    dependence, so the default i.i.d./HC1 errors understate uncertainty)."""
     X = moderators.to_numpy(dtype=float)
     means = X.mean(axis=0)
     stds = X.std(axis=0, ddof=1)
     stds[stds == 0] = 1.0
     Z = (X - means) / stds
     design = sm.add_constant(Z)
-    fit = sm.OLS(cate, design).fit(cov_type="HC1")
+    model = sm.OLS(cate, design)
+    if groups is not None and len(np.unique(groups)) > 1:
+        fit = model.fit(cov_type="cluster", cov_kwds={"groups": np.asarray(groups)})
+        cov_kind = "cluster"
+    else:
+        fit = model.fit(cov_type="HC1")
+        cov_kind = "HC1"
     rows = [{"term": "intercept", "coef": float(fit.params[0]), "se": float(fit.bse[0])}]
     for i, name in enumerate(moderators.columns):
         rows.append(
@@ -105,6 +120,7 @@ def best_linear_projection(cate: np.ndarray, moderators: pd.DataFrame) -> pd.Dat
         )
     table = pd.DataFrame(rows)
     table["tstat"] = table["coef"] / table["se"]
+    table.attrs["cov_type"] = cov_kind
     return table
 
 
@@ -114,6 +130,7 @@ def cate_sort_test(
     outcome: str,
     treatment: str,
     controls: list[str],
+    cluster: str | None = None,
     quantiles: int = 4,
 ) -> pd.DataFrame:
     work = frame.copy()
@@ -129,7 +146,11 @@ def cate_sort_test(
             y = y - sm.OLS(y, C).fit().predict(C)
             t = t - sm.OLS(t, C).fit().predict(C)
         design = sm.add_constant(t)
-        fit = sm.OLS(y, design).fit(cov_type="HC1")
+        model = sm.OLS(y, design)
+        if cluster is not None and group[cluster].nunique() > 1:
+            fit = model.fit(cov_type="cluster", cov_kwds={"groups": group[cluster].to_numpy()})
+        else:
+            fit = model.fit(cov_type="HC1")
         rows.append(
             {
                 "bucket": int(bucket),

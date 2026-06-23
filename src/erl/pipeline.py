@@ -166,15 +166,39 @@ def stage_inference() -> None:
 
 def stage_predict() -> None:
     settings = get_settings()
+    from erl.predict.baseline import train_linear_baselines
     from erl.predict.gbm import shap_importance, train_gbm
 
     panel = read_parquet(settings.processed_dir / "event_panel.parquet")
     features = usable_features(panel, TABULAR_FEATURES)
     logger.info("prediction features: %s", features)
+
+    # Linear baselines first: ML must beat a simple linear model to be justified.
+    baseline = train_linear_baselines(panel, "car_reaction", features)
+    baseline.fold_metrics.to_csv(settings.processed_dir / "baseline_folds.csv", index=False)
+    baseline.oos_predictions.to_csv(
+        settings.processed_dir / "baseline_oos_predictions.csv", index=False
+    )
+
     result = train_gbm(panel, "car_reaction", features)
     result.fold_metrics.to_csv(settings.processed_dir / "gbm_folds.csv", index=False)
     result.oos_predictions.to_csv(settings.processed_dir / "gbm_oos_predictions.csv", index=False)
     logger.info("gbm OOS: %s", result.oos_metrics)
+
+    # Single like-for-like comparison on the same final out-of-sample fold.
+    comparison = pd.DataFrame(
+        [
+            {"model": "ols", **baseline.oos_metrics["ols"]},
+            {"model": "ridge", **baseline.oos_metrics["ridge"]},
+            {"model": "lightgbm", **result.oos_metrics},
+        ]
+    )
+    comparison.to_csv(settings.processed_dir / "prediction_comparison.csv", index=False)
+    logger.info(
+        "OOS prediction comparison (same fold, same metrics):\n%s",
+        comparison.to_string(index=False),
+    )
+
     try:
         shap_importance(result.model, panel[result.features].dropna()).to_csv(
             settings.processed_dir / "gbm_shap.csv", index=False
