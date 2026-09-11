@@ -121,7 +121,125 @@ def test_causal_forest_recovers_heterogeneity():
     blp_x1 = result.blp[result.blp["term"] == "m_x1"].iloc[0]
     blp_x2 = result.blp[result.blp["term"] == "m_x2"].iloc[0]
     assert blp_x1["coef"] > 3 * abs(blp_x2["coef"])
+    assert abs(blp_x1["tstat"]) > 3
+    assert abs(blp_x2["tstat"]) < 3
+    assert np.isfinite(result.ate_se) and result.ate_se > 0
+
+    # The naive projection (CATE on moderators) must not be trusted for
+    # inference: its standard errors are mechanically smaller than the
+    # residual-based BLP because it ignores estimation error in the CATEs.
+    naive_x2 = result.blp_naive[result.blp_naive["term"] == "m_x2"].iloc[0]
+    assert naive_x2["se"] < blp_x2["se"]
 
     calib = result.calibration
     assert calib.attrs["top_minus_bottom"] > 0.8
     assert calib.attrs["rank_correlation"] > 0.7
+
+
+def test_blp_standard_errors_are_honest_under_no_heterogeneity():
+    """With a constant effect, the residual-based BLP should reject at roughly
+    the nominal rate. The naive CATE projection over-rejects badly."""
+    from erl.inference.causal_forest import best_linear_projection, naive_cate_projection
+
+    rng = np.random.default_rng(5)
+    rejections_blp, rejections_naive = 0, 0
+    reps = 30
+    for _ in range(reps):
+        n = 600
+        Z = pd.DataFrame(rng.normal(size=(n, 2)), columns=["z1", "z2"])
+        t_res = rng.normal(size=n)
+        y_res = 1.0 * t_res + rng.normal(size=n)
+        # a smooth "fitted CATE" that is pure noise around the true constant 1.0
+        fake_cate = 1.0 + 0.05 * Z["z1"].to_numpy() + 0.02 * rng.normal(size=n)
+        blp = best_linear_projection(y_res, t_res, Z)
+        naive = naive_cate_projection(fake_cate, Z)
+        rejections_blp += int(abs(blp.loc[blp["term"] == "z1", "tstat"].iloc[0]) > 1.96)
+        rejections_naive += int(abs(naive.loc[naive["term"] == "z1", "tstat"].iloc[0]) > 1.96)
+    assert rejections_blp <= 6  # ~5% nominal, generous bound for 30 reps
+    assert rejections_naive >= 25
+
+
+def _stability_panel(n: int = 1600, break_effect: float = 0.0) -> pd.DataFrame:
+    rng = np.random.default_rng(19)
+    dates = pd.date_range("2015-01-01", "2024-12-01", periods=n)
+    sue = rng.normal(size=n)
+    post = (dates >= pd.Timestamp("2022-01-01")).astype(float)
+    car = (0.01 + break_effect * post) * sue + rng.normal(scale=0.03, size=n)
+    return pd.DataFrame(
+        {
+            "car_reaction": car,
+            "sue": sue,
+            "announce_date": dates,
+            "ticker": [f"T{i % 70}" for i in range(n)],
+            "announce_quarter": pd.PeriodIndex(dates, freq="Q").astype(str),
+        }
+    )
+
+
+def test_regime_stability_detects_a_real_break():
+    from erl.inference.stability import regime_stability
+
+    table = regime_stability(_stability_panel(break_effect=0.03))
+    assert len(table) == 3
+    assert table.attrs["wald_pvalue"] < 0.01
+    late = table[table["regime"].str.startswith("2022")].iloc[0]
+    early = table[table["is_base"]].iloc[0]
+    assert late["effect"] > early["effect"]
+
+
+def test_regime_stability_does_not_invent_a_break():
+    from erl.inference.stability import regime_stability
+
+    table = regime_stability(_stability_panel(break_effect=0.0))
+    assert table.attrs["wald_pvalue"] > 0.05
+
+
+def test_rolling_effect_tracks_the_slope():
+    from erl.inference.stability import rolling_effect
+
+    table = rolling_effect(_stability_panel(break_effect=0.04), window=400, step=100)
+    assert len(table) >= 3
+    assert table["effect"].iloc[-1] > table["effect"].iloc[0]
+
+
+def test_breaks_outside_the_sample_are_dropped():
+    from erl.inference.stability import applicable_breaks, regime_stability
+
+    panel = _stability_panel()  # runs 2015-2024
+    # the GFC breaks predate this sample and must not create empty regimes
+    kept = applicable_breaks(panel["announce_date"])
+    assert "2008-09-15" not in kept
+    assert "2020-03-01" in kept and "2022-01-01" in kept
+    table = regime_stability(panel)
+    assert len(table) == len(kept) + 1
+    assert (table["n"] > 0).all()
+
+
+def test_breaks_are_kept_when_the_sample_reaches_back():
+    from erl.inference.stability import applicable_breaks
+
+    # ~500 names reporting quarterly over 2005-2024 is roughly 40k events, so
+    # even the 10-month GFC crisis window holds enough to estimate a slope.
+    dates = pd.Series(pd.date_range("2005-01-01", "2024-12-01", periods=40000))
+    assert applicable_breaks(dates) == (
+        "2008-09-15", "2009-07-01", "2020-03-01", "2022-01-01",
+    )
+
+
+def test_narrow_window_is_dropped_in_a_thin_sample():
+    from erl.inference.stability import applicable_breaks
+
+    # A 30-name pilot over the same span cannot support the crisis window; the
+    # surrounding breaks survive so the partition stays estimable.
+    dates = pd.Series(pd.date_range("2005-01-01", "2024-12-01", periods=2400))
+    kept = applicable_breaks(dates)
+    assert "2009-07-01" not in kept
+    assert "2008-09-15" in kept and "2020-03-01" in kept
+
+
+def test_short_sample_yields_no_test_rather_than_a_broken_one():
+    from erl.inference.stability import regime_stability
+
+    panel = _stability_panel(n=200)
+    panel["announce_date"] = pd.date_range("2024-01-01", periods=200, freq="D")
+    assert regime_stability(panel).empty

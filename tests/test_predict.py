@@ -103,3 +103,121 @@ def test_shap_ranks_true_drivers_first():
     table = shap_importance(result.model, panel[features])
     top_two = set(table["feature"].iloc[:2])
     assert top_two == {"f0", "f1"}
+
+
+def test_gbm_does_not_collapse_on_decimal_scale_target():
+    """Regression test for the degenerate-model bug: a weak signal on a
+    decimal-return scale (sd ~ 0.03) must still produce a model that uses more
+    than one feature and has non-trivial prediction dispersion."""
+    from erl.predict.gbm import train_gbm
+
+    n = 2500
+    X = RNG.normal(size=(n, 6))
+    y = 0.006 * X[:, 0] + 0.005 * X[:, 1] + 0.004 * X[:, 0] * X[:, 2] + RNG.normal(
+        scale=0.03, size=n
+    )
+    frame = pd.DataFrame(X, columns=[f"f{i}" for i in range(6)])
+    frame["car_reaction"] = y
+    frame["announce_date"] = make_dates(n)
+    frame["ticker"] = [f"T{i % 80}" for i in range(n)]
+    frame["event_id"] = [f"e{i}" for i in range(n)]
+    result = train_gbm(
+        frame,
+        "car_reaction",
+        [f"f{i}" for i in range(6)],
+        cv=PurgedWalkForwardCV(n_splits=3, purge_days=10),
+        n_trials=8,
+    )
+    usage = result.feature_usage
+    assert usage is not None
+    assert int((usage["n_splits"] > 0).sum()) >= 2
+    assert result.oos_predictions["y_pred"].std() > 0.002
+    assert result.oos_metrics["rank_ic"] > 0.1
+    # predictions are returned on the original (decimal) scale
+    assert result.oos_predictions["y_pred"].abs().max() < 0.5
+
+
+def test_oos_r2_uses_the_training_mean_as_benchmark():
+    from erl.predict.gbm import regression_metrics
+
+    rng = np.random.default_rng(0)
+    y_train = rng.normal(0.0, 0.03, 800)
+    y_test = rng.normal(0.02, 0.03, 200)  # the test period has a different mean
+    predict_train_mean = np.full(200, y_train.mean())
+    metrics = regression_metrics(y_test, predict_train_mean, y_train=y_train)
+    # predicting the training mean is exactly the benchmark, so r2 is ~0
+    assert abs(metrics["r2"]) < 0.02
+    assert metrics["r2_benchmark"] == "train_mean"
+    # the test-mean version penalises the same model for the mean shift
+    assert metrics["r2_within"] < -0.3
+
+
+def _paired_frame(n=800, gap=0.0, seed=0):
+    rng = np.random.default_rng(seed)
+    dates = pd.Series(pd.date_range("2020-01-01", periods=n, freq="D"))
+    y = rng.normal(scale=0.03, size=n)
+    # model a sees a fraction of the signal; b sees that fraction minus `gap`
+    signal = y + rng.normal(scale=0.03, size=n)
+    noise = rng.normal(scale=0.03, size=n)
+    return pd.DataFrame(
+        {
+            "announce_date": dates,
+            "y_true": y,
+            "y_pred_a": 0.3 * signal + (0.3 - gap) * 0.0 + 0.0 * noise,
+            "y_pred_b": (0.3 - gap) * signal + gap * noise,
+        }
+    )
+
+
+def test_paired_tests_do_not_separate_equally_good_models():
+    from erl.predict.compare import compare_models
+
+    frame = _paired_frame(gap=0.0)
+    frame["y_pred_b"] = frame["y_pred_a"] + np.random.default_rng(1).normal(
+        scale=1e-6, size=len(frame)
+    )
+    table = compare_models(frame, "a", ["b"], n_boot=300)
+    assert table["verdict"].iloc[0] == "indistinguishable"
+    assert abs(table["ic_diff"].iloc[0]) < 0.05
+
+
+def test_paired_tests_detect_a_genuinely_better_model():
+    from erl.predict.compare import compare_models
+
+    rng = np.random.default_rng(3)
+    n = 1200
+    dates = pd.Series(pd.date_range("2018-01-01", periods=n, freq="D"))
+    y = rng.normal(scale=0.03, size=n)
+    good = y + rng.normal(scale=0.02, size=n)      # informative
+    bad = rng.normal(scale=0.03, size=n)           # pure noise
+    frame = pd.DataFrame(
+        {"announce_date": dates, "y_true": y, "y_pred_a": 0.5 * good, "y_pred_b": 0.5 * bad}
+    )
+    table = compare_models(frame, "a", ["b"], n_boot=300)
+    row = table.iloc[0]
+    assert row["verdict"] == "differs"
+    assert row["mse_diff"] < 0          # a has lower squared error
+    assert row["ic_diff"] > 0           # a ranks better
+    assert row["mse_pvalue"] < 0.05
+
+
+def test_block_bootstrap_respects_quarterly_clustering():
+    """Resampling whole quarters must give a wider standard error than
+    resampling events independently would, when the gap is driven by a few
+    quarters rather than spread evenly."""
+    from erl.predict.compare import rank_ic_difference_test
+
+    rng = np.random.default_rng(11)
+    n = 1200
+    dates = pd.Series(pd.date_range("2015-01-01", periods=n, freq="D"))
+    y = rng.normal(size=n)
+    pred_a = rng.normal(size=n)
+    pred_b = rng.normal(size=n)
+    # only 2015 carries any signal, so the gap is concentrated in a few quarters
+    early = (dates.dt.year == 2015).to_numpy()
+    pred_a[early] = y[early] + rng.normal(scale=0.5, size=early.sum())
+    out = rank_ic_difference_test(y, pred_a, pred_b, dates, n_boot=400)
+    assert out["ic_diff"] > 0
+    assert out["se"] > 0
+    assert out["ci_low"] < out["ic_diff"] < out["ci_high"]
+    assert out["n_blocks"] >= 8

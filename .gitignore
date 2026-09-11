@@ -6,3 +6,27 @@ __pycache__/
 .ipynb_checkpoints/
 *.egg-info/
 .DS_Store
+
+# Run logs. Logs produced before the httpx logger was capped at WARNING contain
+# the API key in every request URL, so these must never be committed. The
+# patterns are deliberately broad: the earlier, narrower list missed the
+# filenames actually used in practice (full_run.txt, panel_adj.txt).
+*.log
+*_log.txt
+*_run*.txt
+run_*.txt
+full_run*.txt
+harvest*.txt
+panel*.txt
+inference*.txt
+predict*.txt
+plots*.txt
+export*.txt
+*_adj.txt
+*_out.txt
+
+# Outputs: data/ holds the parquet panel, the result CSVs and results.xlsx.
+# Figures and any results deliberately published belong in reports/, which is
+# tracked.
+!reports/
+!reports/*.png

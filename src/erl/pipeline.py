@@ -17,6 +17,9 @@ from erl.utils import read_parquet, write_parquet
 
 logger = logging.getLogger(__name__)
 
+# momentum_12_1 is the market-adjusted 12-1 return, matching the run-up features;
+# momentum_12_1_raw (total return) is built too but kept out of the model so the
+# two horizons are on the same footing.
 TABULAR_FEATURES = [
     "sue", "eps_beat", "both_beat", "prior_streak",
     "runup_20d", "runup_60d", "momentum_12_1",
@@ -106,13 +109,100 @@ def stage_harvest(mode: str = "pilot") -> None:
     tickers = resolve_universe(client, mode)
     logger.info("harvesting %d tickers (%s)", len(tickers), mode)
 
-    harvest_surprises(client, tickers, settings.start_date,
-                      out_path=settings.interim_dir / "surprises.parquet")
-    harvest_prices(client, tickers + settings.benchmark_symbols, settings.start_date,
-                   out_path=settings.interim_dir / "prices.parquet")
+    surprises = harvest_surprises(client, tickers, settings.start_date,
+                                  out_path=settings.interim_dir / "surprises.parquet")
+    pd.DataFrame([{
+        "stage": "harvest",
+        "universe": mode,
+        "tickers_requested": len(tickers),
+        "events": len(surprises),
+        "tickers_with_events": int(surprises["ticker"].nunique()) if not surprises.empty else 0,
+        "start_date": settings.start_date,
+        "date_min": str(surprises["announce_date"].min()) if not surprises.empty else "",
+        "date_max": str(surprises["announce_date"].max()) if not surprises.empty else "",
+    }]).to_csv(settings.processed_dir / "harvest_manifest.csv", index=False)
+    if not surprises.empty and "estimate_backfilled" in surprises.columns:
+        from erl.harvest.surprises import backfill_rate_by_year
+
+        backfill_rate_by_year(surprises).to_csv(
+            settings.processed_dir / "estimate_backfill_by_year.csv", index=False
+        )
+    prices = harvest_prices(client, tickers + settings.benchmark_symbols, settings.start_date)
+    # FMP price endpoints are not split-adjusted (the dividend-adjusted one is
+    # not either), so a 2:1 split reads as a -50% daily return. Adjust before
+    # anything downstream computes a return from these prices.
+    from erl.harvest.splits import adjust_for_splits, harvest_splits, verify_adjustment
+
+    # Splits must be fetched for everything in the price frame, not just the
+    # equity universe. The ETF proxies split too: VIXY has reverse-split
+    # repeatedly, and an unadjusted reverse split would corrupt vix_level as a
+    # control. Index symbols (^GSPC, ^VIX) never split and are not tradable, so
+    # they are excluded rather than sent as doomed requests.
+    split_symbols = [
+        s for s in dict.fromkeys(tickers + settings.benchmark_symbols)
+        if not s.startswith("^")
+    ]
+    splits = harvest_splits(client, split_symbols, settings.start_date,
+                            out_path=settings.interim_dir / "splits.parquet")
+    if prices.empty:
+        logger.error(
+            "no prices harvested; leaving any existing prices.parquet in place, which "
+            "means downstream stages would run on stale data. Fix the harvest first."
+        )
+    else:
+        prices = adjust_for_splits(prices, splits)
+        remaining = verify_adjustment(prices)
+        from erl.harvest.splits import suspicious_tickers, unexplained_artifacts
+
+        artifacts = unexplained_artifacts(prices, splits)
+        if not artifacts.empty:
+            artifacts.to_csv(
+                settings.processed_dir / "residual_artifacts.csv", index=False
+            )
+            flagged = suspicious_tickers(artifacts)
+            if not flagged.empty:
+                flagged.to_csv(
+                    settings.processed_dir / "suspicious_tickers.csv", index=False
+                )
+        pd.DataFrame([{
+            "split_events": len(splits),
+            "splits_applied": prices.attrs.get("splits_applied"),
+            "splits_already_adjusted": prices.attrs.get("splits_already_adjusted"),
+            "splits_ambiguous": prices.attrs.get("splits_ambiguous"),
+            "tickers_adjusted": int(prices["split_adjusted"].groupby(
+                prices["ticker"]).any().sum()) if "split_adjusted" in prices.columns else 0,
+            "split_shaped_returns_remaining": remaining,
+            "artifacts_on_tickers_the_feed_covers": int(
+                artifacts["feed_covers_ticker"].sum()) if not artifacts.empty else 0,
+            "suspicious_tickers": int(len(flagged)) if not artifacts.empty else 0,
+        }]).to_csv(settings.processed_dir / "split_adjustment.csv", index=False)
+        write_parquet(prices, settings.interim_dir / "prices.parquet")
     harvest_fundamentals(client, tickers, settings.start_date,
                          out_path=settings.interim_dir / "fundamentals.parquet")
     client.close()
+
+    # Did data actually arrive for the delisted names, or only the survivors?
+    membership_path = settings.interim_dir / "membership.parquet"
+    prices_path = settings.interim_dir / "prices.parquet"
+    if membership_path.exists() and prices_path.exists():
+        from erl.universe import membership_coverage
+
+        membership = pd.read_parquet(membership_path)
+        harvested = set(pd.read_parquet(prices_path, columns=["ticker"])["ticker"].unique())
+        coverage = membership_coverage(membership, harvested)
+        coverage.to_csv(settings.processed_dir / "universe_coverage.csv", index=False)
+        by_era = coverage.attrs.get("by_era") or []
+        if by_era:
+            era = pd.DataFrame(by_era)
+            era.to_csv(settings.processed_dir / "universe_coverage_by_era.csv", index=False)
+            logger.info(
+                "coverage of departed names by removal year:\n%s", era.to_string(index=False)
+            )
+        missing = coverage.attrs.get("missing_tickers") or []
+        if missing:
+            pd.DataFrame({"ticker": missing}).to_csv(
+                settings.processed_dir / "universe_missing.csv", index=False
+            )
 
 
 def stage_panel() -> pd.DataFrame:
@@ -130,6 +220,46 @@ def stage_panel() -> pd.DataFrame:
         )
     panel = build_panel(events, prices, fundamentals, benchmark=settings.benchmark_symbol)
     write_parquet(panel, settings.processed_dir / "event_panel.parquet")
+    artifacts_path = settings.processed_dir / "residual_artifacts.csv"
+    if artifacts_path.exists():
+        from erl.harvest.splits import events_touched
+
+        artifacts = pd.read_csv(artifacts_path, parse_dates=["date"])
+        touched = events_touched(panel, artifacts)
+        share = touched / max(len(panel), 1)
+        logger.info(
+            "%d of %d events (%.2f%%) have an unexplained split-shaped return inside a "
+            "feature window", touched, len(panel), 100 * share,
+        )
+        if share > 0.02:
+            logger.warning(
+                "%.1f%% of events are exposed to a residual price artifact; report this "
+                "or exclude the affected tickers", 100 * share,
+            )
+        pd.DataFrame([{"events_touched": touched, "events": len(panel), "share": share}]).to_csv(
+            settings.processed_dir / "artifact_exposure.csv", index=False
+        )
+
+    pd.DataFrame([{
+        "stage": "panel",
+        "events": len(panel),
+        "tickers": int(panel["ticker"].nunique()) if "ticker" in panel.columns else 0,
+        "date_min": str(pd.to_datetime(panel["announce_date"]).min()),
+        "date_max": str(pd.to_datetime(panel["announce_date"]).max()),
+    }]).to_csv(settings.processed_dir / "panel_manifest.csv", index=False)
+
+    used = {k: panel.attrs.get(k) for k in ("vix_symbol_used", "rate_symbol_used")}
+    if any(used.values()):
+        logger.info("market-state series used: %s", used)
+        pd.DataFrame([used]).to_csv(
+            settings.processed_dir / "market_state_symbols.csv", index=False
+        )
+
+    diagnostic = panel.attrs.get("alignment_diagnostic")
+    if diagnostic:
+        pd.DataFrame(diagnostic).to_csv(
+            settings.processed_dir / "alignment_diagnostic.csv", index=False
+        )
     logger.info("panel built: %d events, %d columns", len(panel), panel.shape[1])
     return panel
 
@@ -150,6 +280,52 @@ def stage_inference() -> None:
         "baseline surprise effect: %.4f (se %.4f, t %.2f, n %d)",
         baseline.coef, baseline.se, baseline.tstat, baseline.n,
     )
+    pd.DataFrame([{
+        "coef": baseline.coef, "se": baseline.se, "tstat": baseline.tstat,
+        "pvalue": baseline.pvalue, "n": baseline.n,
+        "selected_controls": ";".join(baseline.selected_controls),
+    }]).to_csv(settings.processed_dir / "double_lasso_baseline.csv", index=False)
+
+    # Is that pooled number a single relationship or an average across regimes?
+    from erl.inference.stability import regime_stability, rolling_effect
+
+    regimes = regime_stability(panel, "car_reaction", "sue", controls)
+    if not regimes.empty:
+        regimes.to_csv(settings.processed_dir / "regime_stability.csv", index=False)
+        pd.DataFrame([{
+            "wald_statistic": regimes.attrs.get("wald_statistic"),
+            "wald_dof": regimes.attrs.get("wald_dof"),
+            "wald_pvalue": regimes.attrs.get("wald_pvalue"),
+            "n": regimes.attrs.get("n"),
+            "breaks": ";".join(regimes.attrs.get("breaks", [])),
+        }]).to_csv(settings.processed_dir / "regime_stability_test.csv", index=False)
+    rolling = rolling_effect(panel, "car_reaction", "sue")
+    if not rolling.empty:
+        rolling.to_csv(settings.processed_dir / "rolling_effect.csv", index=False)
+
+    # Is a regime difference a change in pricing, or just a change in
+    # volatility? Re-run the same test on the vol-standardised reaction. If the
+    # break survives, it is not a volatility artifact.
+    if "car_reaction_vol_adj" in panel.columns:
+        adj_regimes = regime_stability(panel, "car_reaction_vol_adj", "sue", controls)
+        if not adj_regimes.empty:
+            adj_regimes.to_csv(
+                settings.processed_dir / "regime_stability_voladj.csv", index=False
+            )
+            pd.DataFrame([{
+                "wald_statistic": adj_regimes.attrs.get("wald_statistic"),
+                "wald_dof": adj_regimes.attrs.get("wald_dof"),
+                "wald_pvalue": adj_regimes.attrs.get("wald_pvalue"),
+                "n": adj_regimes.attrs.get("n"),
+                "target": "car_reaction_vol_adj",
+            }]).to_csv(
+                settings.processed_dir / "regime_stability_voladj_test.csv", index=False
+            )
+        adj_rolling = rolling_effect(panel, "car_reaction_vol_adj", "sue")
+        if not adj_rolling.empty:
+            adj_rolling.to_csv(
+                settings.processed_dir / "rolling_effect_voladj.csv", index=False
+            )
     if not moderators:
         logger.warning(
             "no moderators with sufficient coverage on this plan; skipping interaction "
@@ -161,7 +337,12 @@ def stage_inference() -> None:
     forest = fit_causal_forest(panel, "car_reaction", "sue", moderators,
                                controls=controls, cluster="ticker")
     forest.blp.to_csv(settings.processed_dir / "forest_blp.csv", index=False)
+    if forest.blp_naive is not None:
+        forest.blp_naive.to_csv(settings.processed_dir / "forest_blp_naive.csv", index=False)
     forest.calibration.to_csv(settings.processed_dir / "forest_calibration.csv", index=False)
+    pd.DataFrame([{"ate": forest.ate, "se": forest.ate_se, "n": forest.n}]).to_csv(
+        settings.processed_dir / "forest_ate.csv", index=False
+    )
 
 
 def stage_predict() -> None:
@@ -183,6 +364,11 @@ def stage_predict() -> None:
     result = train_gbm(panel, "car_reaction", features)
     result.fold_metrics.to_csv(settings.processed_dir / "gbm_folds.csv", index=False)
     result.oos_predictions.to_csv(settings.processed_dir / "gbm_oos_predictions.csv", index=False)
+    if result.feature_usage is not None:
+        result.feature_usage.to_csv(settings.processed_dir / "gbm_feature_usage.csv", index=False)
+    pd.DataFrame([result.best_params]).to_csv(
+        settings.processed_dir / "gbm_best_params.csv", index=False
+    )
     logger.info("gbm OOS: %s", result.oos_metrics)
 
     # Single like-for-like comparison on the same final out-of-sample fold.
@@ -198,6 +384,35 @@ def stage_predict() -> None:
         "OOS prediction comparison (same fold, same metrics):\n%s",
         comparison.to_string(index=False),
     )
+
+    # Is the ordering above real? The metrics alone cannot say.
+    from erl.predict.compare import compare_models
+
+    paired = baseline.oos_predictions.copy()
+    gbm_pred = result.oos_predictions
+    key = "event_id" if "event_id" in gbm_pred.columns and "event_id" in paired.columns else None
+    if key is None:
+        # Both frames come from the same final fold in the same row order.
+        if len(paired) == len(gbm_pred):
+            paired["y_pred_lightgbm"] = gbm_pred["y_pred"].to_numpy()
+        else:
+            logger.warning(
+                "cannot align baseline (%d rows) and gbm (%d rows) predictions; "
+                "skipping the paired significance test",
+                len(paired), len(gbm_pred),
+            )
+            paired = None
+    else:
+        paired = paired.merge(
+            gbm_pred[[key, "y_pred"]].rename(columns={"y_pred": "y_pred_lightgbm"}),
+            on=key, how="inner",
+        )
+    if paired is not None and not paired.empty:
+        significance = compare_models(paired, "lightgbm", ["ols", "ridge"])
+        if not significance.empty:
+            significance.to_csv(
+                settings.processed_dir / "prediction_significance.csv", index=False
+            )
 
     try:
         shap_importance(result.model, panel[result.features].dropna()).to_csv(
@@ -219,22 +434,37 @@ def stage_plots() -> None:
         logger.info("figure: %s", path)
 
 
+def stage_export() -> None:
+    settings = get_settings()
+    from erl.export import export_results
+
+    written = export_results(settings.processed_dir)
+    for path in written:
+        logger.info("export: %s", path)
+
+
 STAGES = {
     "harvest": lambda args: stage_harvest(args.universe),
     "panel": lambda args: stage_panel(),
     "inference": lambda args: stage_inference(),
     "predict": lambda args: stage_predict(),
     "plots": lambda args: stage_plots(),
+    "export": lambda args: stage_export(),
 }
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # httpx logs the full request URL at INFO, and the FMP key travels as a query
+    # parameter, so every line of a redirected log would contain the secret. A
+    # log file is the easiest way to leak a key into a git history.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(description="Earnings Reaction Lab pipeline")
     parser.add_argument("stage", choices=[*STAGES, "all"])
     parser.add_argument("--universe", choices=["pilot", "sp500"], default="pilot")
     args = parser.parse_args()
-    order = ["harvest", "panel", "inference", "predict", "plots"]
+    order = ["harvest", "panel", "inference", "predict", "plots", "export"]
     todo = order if args.stage == "all" else [args.stage]
     for stage in todo:
         logger.info("=== stage: %s ===", stage)

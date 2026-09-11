@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pandas as pd
 import pytest
 
 from erl.config import Settings
@@ -115,3 +116,87 @@ def test_client_gives_up_after_retries(tmp_path):
     with pytest.raises(FMPError) as excinfo:
         client.get("/always429")
     assert excinfo.value.status == 429
+
+
+def test_removal_only_record_is_not_read_as_an_addition():
+    """A removal-only row that echoes the departing ticker in `symbol` must not
+    open a new spell on the day the firm left the index."""
+    from erl.universe import parse_change
+
+    swap = {
+        "symbol": "NEW",
+        "addedSecurity": "New Co",
+        "removedTicker": "OLD",
+        "removedSecurity": "Old Co",
+    }
+    assert parse_change(swap) == ("NEW", "OLD")
+
+    removal_only = {
+        "symbol": "OLD",
+        "addedSecurity": "",
+        "removedTicker": "OLD",
+        "removedSecurity": "Old Co",
+    }
+    assert parse_change(removal_only) == ("", "OLD")
+
+    addition_only = {
+        "symbol": "NEW",
+        "addedSecurity": "New Co",
+        "removedTicker": "",
+        "removedSecurity": "",
+    }
+    assert parse_change(addition_only) == ("NEW", "")
+
+
+def test_membership_closes_the_spell_of_a_delisted_name():
+    from erl.universe import build_membership, members_on
+
+    # GONE was a member at the start and was removed in 2009; SURV is current.
+    events = [
+        (pd.Timestamp("2009-06-01"), "", "GONE"),
+        (pd.Timestamp("2012-01-01"), "LATER", ""),
+    ]
+    membership = build_membership({"SURV", "LATER"}, events, "2005-01-01")
+    assert "GONE" in members_on(membership, "2008-01-01")
+    assert "GONE" not in members_on(membership, "2010-01-01")
+    assert "LATER" not in members_on(membership, "2010-01-01")
+    assert "LATER" in members_on(membership, "2013-01-01")
+    gone = membership[membership["ticker"] == "GONE"].iloc[0]
+    assert gone["removed_date"] == pd.Timestamp("2009-06-01")
+
+
+def test_coverage_flags_missing_delisted_names():
+    from erl.universe import build_membership, membership_coverage
+
+    events = [
+        (pd.Timestamp("2009-06-01"), "", "GONE"),
+        (pd.Timestamp("2010-06-01"), "", "ALSOGONE"),
+    ]
+    membership = build_membership({"SURV"}, events, "2005-01-01")
+    # prices arrived for the survivor only
+    coverage = membership_coverage(membership, {"SURV"})
+    left = coverage[coverage["group"] == "left the index"].iloc[0]
+    stayed = coverage[coverage["group"] == "still a member"].iloc[0]
+    assert left["coverage"] == 0.0
+    assert stayed["coverage"] == 1.0
+    assert set(coverage.attrs["missing_tickers"]) == {"GONE", "ALSOGONE"}
+
+
+def test_coverage_by_era_locates_the_survivorship_gap():
+    """A single coverage figure hides which period the missing names sit in."""
+    from erl.universe import coverage_by_era
+
+    membership = pd.DataFrame(
+        {
+            "ticker": ["OLD1", "OLD2", "NEW1", "NEW2", "STAY"],
+            "added_date": pd.NaT,
+            "removed_date": pd.to_datetime(
+                ["2008-03-01", "2008-09-01", "2023-01-01", "2023-06-01", None]
+            ),
+        }
+    )
+    # the two old delistings are unavailable, the recent ones are fine
+    out = coverage_by_era(membership, {"NEW1", "NEW2", "STAY"}).set_index("removal_year")
+    assert out.loc[2008, "coverage"] == 0.0
+    assert out.loc[2023, "coverage"] == 1.0
+    assert "STAY" not in out.index  # current members are not in this table

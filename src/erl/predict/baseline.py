@@ -71,6 +71,10 @@ def train_linear_baselines(
     oos_metrics: dict[str, dict[str, float]] = {}
     final_train, final_test = folds[-1]
     oos_frame = frame.iloc[final_test][[date_col]].copy()
+    if "event_id" in frame.columns:
+        # Carried so the paired significance test can join on identity rather
+        # than on row position.
+        oos_frame["event_id"] = frame.iloc[final_test]["event_id"].to_numpy()
     if "ticker" in frame.columns:
         oos_frame["ticker"] = frame.iloc[final_test]["ticker"].to_numpy()
     oos_frame["y_true"] = y[final_test]
@@ -87,13 +91,15 @@ def train_linear_baselines(
                     "role": "oos_final" if i == len(folds) else "tuning",
                     "n_train": len(train_idx),
                     "n_test": len(test_idx),
-                    **regression_metrics(y[test_idx], pred),
+                    **regression_metrics(y[test_idx], pred, y_train=y[train_idx]),
                 }
             )
         model = clone(proto)
         model.fit(X.iloc[final_train], y[final_train])
         final_pred = model.predict(X.iloc[final_test])
-        oos_metrics[name] = regression_metrics(y[final_test], final_pred)
+        oos_metrics[name] = regression_metrics(
+            y[final_test], final_pred, y_train=y[final_train]
+        )
         oos_frame[f"y_pred_{name}"] = final_pred
         logger.info(
             "baseline %-5s OOS r2=%.4f rank_ic=%.4f",

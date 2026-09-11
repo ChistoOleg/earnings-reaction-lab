@@ -148,3 +148,63 @@ def test_harvest_transcripts_plan_gate_message():
     with pytest.raises(FMPError) as excinfo:
         harvest_transcripts(client, ["AAPL"], [2024])
     assert "Ultimate" in str(excinfo.value)
+
+
+def test_placeholder_estimates_are_flagged_not_trusted():
+    """Rows where the feed copied the actual into the estimate field must be
+    flagged: their zero surprise is an artifact, not an unsurprised market."""
+    from erl.harvest.surprises import parse_calendar
+
+    rows = [
+        {   # real consensus: revenue estimate differs from the reported figure
+            "symbol": "JNJ", "date": "2002-04-16",
+            "epsActual": 0.59, "epsEstimated": 0.58,
+            "revenueActual": 8743000000, "revenueEstimated": 8594813559,
+        },
+        {   # placeholder: both estimates equal the actuals exactly
+            "symbol": "JNJ", "date": "2002-01-22",
+            "epsActual": 0.39, "epsEstimated": 0.39,
+            "revenueActual": 8403000000, "revenueEstimated": 8403000000,
+        },
+        {   # genuine zero EPS surprise, but revenue proves a real estimate existed
+            "symbol": "JNJ", "date": "2010-01-22",
+            "epsActual": 1.00, "epsEstimated": 1.00,
+            "revenueActual": 9000000000, "revenueEstimated": 8950000000,
+        },
+    ]
+    frame = parse_calendar("JNJ", rows, "2000-01-01").set_index("announce_date")
+    assert not frame.loc["2002-04-16", "estimate_backfilled"]
+    assert frame.loc["2002-01-22", "estimate_backfilled"]
+    assert not frame.loc["2010-01-22", "estimate_backfilled"]
+    # the genuine zero surprise survives and stays zero
+    assert frame.loc["2010-01-22", "surprise"] == 0.0
+
+
+def test_backfill_rate_by_year_reports_the_early_cluster():
+    from erl.harvest.surprises import backfill_rate_by_year
+
+    events = pd.DataFrame(
+        {
+            "announce_date": pd.to_datetime(
+                ["2002-01-01", "2002-04-01", "2015-01-01", "2015-04-01"]
+            ),
+            "estimate_backfilled": [True, True, False, False],
+        }
+    )
+    out = backfill_rate_by_year(events).set_index("year")
+    assert out.loc[2002, "placeholder_share"] == 1.0
+    assert out.loc[2015, "placeholder_share"] == 0.0
+
+
+def test_missing_time_field_becomes_unknown():
+    """The stable earnings payload carries no announcement-time field, so every
+    event is 'unknown' and the (0, +1) window has to absorb the timing."""
+    from erl.harvest.surprises import parse_calendar
+
+    rows = [{
+        "symbol": "JNJ", "date": "2024-01-23",
+        "epsActual": 2.29, "epsEstimated": 2.28,
+        "revenueActual": 21400000000, "revenueEstimated": 20900000000,
+    }]
+    frame = parse_calendar("JNJ", rows, "2020-01-01")
+    assert frame["announce_time"].iloc[0] == "unknown"

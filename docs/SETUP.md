@@ -5,7 +5,7 @@ getting a Financial Modeling Prep (FMP) API key, installation on both a CPU mach
 GPU machine, configuration, the first run, scaling to the full universe, and troubleshooting.
 
 If you only want the one-paragraph version: install Python 3.10+, create a virtual
-environment, `pip install -r requirements.txt`, run `pytest` to confirm 47 tests pass, put
+environment, `pip install -r requirements.txt`, run `pytest` to confirm 112 tests pass, put
 an FMP key in `.env`, then run `python -m erl.pipeline all --universe pilot`.
 
 ---
@@ -87,7 +87,7 @@ cd earnings-reaction-lab
 Or clone it from GitHub if you have already pushed it:
 
 ```
-git clone https://github.com/YOUR_USERNAME/earnings-reaction-lab.git
+git clone https://github.com/ChistoOleg/earnings-reaction-lab.git
 cd earnings-reaction-lab
 ```
 

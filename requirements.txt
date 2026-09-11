@@ -9,3 +9,5 @@ shap>=0.45
 optuna>=3.6
 doubleml>=0.8
 econml>=0.15
+openpyxl>=3.1
+tabulate>=0.9

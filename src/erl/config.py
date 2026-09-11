@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     max_retries: int = 3
     http_timeout_seconds: float = 30.0
     benchmark_symbol: str = "^GSPC"
-    extra_benchmarks: str = "^VIX,^TNX"
+    # ETF proxies are harvested alongside the index symbols so the market-state
+    # features survive a plan that gates ^VIX/^TNX (both return 402 there).
+    extra_benchmarks: str = "^VIX,^TNX,^TYX,IEF,TLT,VIXY"
     sector_etfs: str = "XLK,XLF,XLV,XLY,XLP,XLE,XLI,XLB,XLU,XLRE,XLC"
 
     @field_validator("start_date")

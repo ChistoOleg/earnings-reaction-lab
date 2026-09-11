@@ -49,7 +49,17 @@ def ar_path(
     ctx: ReturnContext,
     rel_days: tuple[int, int] = (-5, 25),
     split_by_sign: bool = True,
+    require_full_window: bool = True,
 ) -> pd.DataFrame:
+    """Mean cumulative abnormal return by day relative to day 0.
+
+    With ``require_full_window`` (the default) only events that have a return on
+    every day of the window enter the average, so the cumulative path describes
+    one fixed cohort. Without it, events drop out as the window extends (a firm
+    delisted, a short price history) and the cumulated line mixes a changing
+    sample: a level change at day 12 can then be pure composition rather than
+    drift. The per-day count is returned as ``n`` either way.
+    """
     start, end = rel_days
     rows: list[dict] = []
     for event in events.itertuples():
@@ -57,10 +67,14 @@ def ar_path(
         if day0 is None:
             continue
         sign = "beat" if getattr(event, "surprise", 0) > 0 else "miss"
+        values = {}
         for offset in range(start, end + 1):
             value = ctx.car(event.ticker, day0, offset, offset)
-            if np.isnan(value):
-                continue
+            if not np.isnan(value):
+                values[offset] = value
+        if require_full_window and len(values) < (end - start + 1):
+            continue
+        for offset, value in values.items():
             rows.append({"rel_day": offset, "group": sign, "ar": value})
     if not rows:
         return pd.DataFrame()
@@ -72,5 +86,46 @@ def ar_path(
     out = out.sort_values(pivot_keys).reset_index(drop=True)
     cumulative = []
     for _, group in out.groupby("group") if split_by_sign else [(None, out)]:
+        counts = group["n"].to_numpy()
+        if counts.max() > 0 and counts.min() / counts.max() < 0.95:
+            logger.warning(
+                "ar_path sample is unbalanced across the window (n from %d to %d); "
+                "the cumulative path mixes different event cohorts",
+                int(counts.min()),
+                int(counts.max()),
+            )
         cumulative.append(group.assign(cum_ar=group["mean_ar"].cumsum()))
     return pd.concat(cumulative, ignore_index=True)
+
+
+def alignment_diagnostic(
+    events: pd.DataFrame,
+    ctx: ReturnContext,
+    rel_days: tuple[int, int] = (-3, 3),
+) -> pd.DataFrame:
+    """Mean |abnormal return| by day relative to day0, pooled over events.
+
+    If day0 is aligned correctly the peak sits at 0 (before-open reports) or is
+    split between 0 and +1 (a mix of before-open and after-close reports). A
+    peak at -1 means day0 is one trading day late and the (0, +1) reaction
+    window is measuring the tail of the move rather than the move itself.
+    """
+    start, end = rel_days
+    rows: list[dict] = []
+    for event in events.itertuples():
+        day0 = align_day0(event.announce_date, event.announce_time, ctx.calendar)
+        if day0 is None:
+            continue
+        for offset in range(start, end + 1):
+            value = ctx.car(event.ticker, day0, offset, offset)
+            if np.isnan(value):
+                continue
+            rows.append({"rel_day": offset, "abs_ar": abs(value)})
+    if not rows:
+        return pd.DataFrame(columns=["rel_day", "mean_abs_ar", "n"])
+    frame = pd.DataFrame(rows)
+    out = frame.groupby("rel_day")["abs_ar"].agg(["mean", "count"]).reset_index()
+    out = out.rename(columns={"mean": "mean_abs_ar", "count": "n"})
+    peak = int(out.loc[out["mean_abs_ar"].idxmax(), "rel_day"])
+    out.attrs["peak_rel_day"] = peak
+    return out

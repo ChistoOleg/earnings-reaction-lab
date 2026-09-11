@@ -19,6 +19,8 @@ class ForestResult:
     moderators: list[str]
     n: int
     model: object
+    ate_se: float = float("nan")
+    blp_naive: pd.DataFrame | None = None
 
 
 def _default_nuisance(random_state: int):
@@ -66,16 +68,28 @@ def fit_causal_forest(
         cv=splitter,
         random_state=random_state,
     )
-    estimator.fit(y, t, X=X, W=W, groups=groups)
+    # cache_values keeps the cross-fitted nuisance residuals (Y - E[Y|X,W],
+    # T - E[T|X,W]) on the estimator; the best linear projection below needs them.
+    estimator.fit(y, t, X=X, W=W, groups=groups, cache_values=True)
     cate = np.asarray(estimator.effect(X)).ravel()
     ate = float(cate.mean())
+    ate_se = float("nan")
+    try:
+        ate_inf = estimator.ate_inference(X=X)
+        ate = float(np.ravel(ate_inf.mean_point)[0])
+        ate_se = float(np.ravel(ate_inf.stderr_mean)[0])
+    except Exception as exc:  # inference is optional; the point estimate stands
+        logger.warning("ATE inference unavailable (%s); reporting mean CATE without SE", exc)
 
-    blp = best_linear_projection(cate, frame[moderators], groups=groups)
+    y_res, t_res = _nuisance_residuals(estimator, y, t, X, W, groups, splitter, random_state)
+    blp = best_linear_projection(y_res, t_res, frame[moderators], groups=groups)
+    blp_naive = naive_cate_projection(cate, frame[moderators], groups=groups)
     calibration = cate_sort_test(frame, cate, outcome, treatment, controls, cluster=cluster)
     logger.info(
-        "causal forest fit: n=%d, ate=%.5f, cate sd=%.5f, BLP SEs=%s",
+        "causal forest fit: n=%d, ate=%.5f (se %.5f), cate sd=%.5f, BLP SEs=%s",
         len(frame),
         ate,
+        ate_se,
         cate.std(),
         blp.attrs.get("cov_type", "HC1"),
     )
@@ -87,40 +101,99 @@ def fit_causal_forest(
         moderators=moderators,
         n=len(frame),
         model=estimator,
+        ate_se=ate_se,
+        blp_naive=blp_naive,
     )
 
 
-def best_linear_projection(
-    cate: np.ndarray, moderators: pd.DataFrame, groups: np.ndarray | None = None
-) -> pd.DataFrame:
-    """Project estimated CATEs on standardized moderators. Standard errors are
-    cluster-robust by firm when ``groups`` is supplied (the panel has within-firm
-    dependence, so the default i.i.d./HC1 errors understate uncertainty)."""
+def _nuisance_residuals(estimator, y, t, X, W, groups, splitter, random_state: int):
+    """Cross-fitted residuals of outcome and treatment. Taken from the fitted
+    estimator when available; otherwise recomputed with the same nuisance
+    models and the same grouped folds."""
+    try:
+        y_res, t_res, _, _ = estimator.residuals_
+        return np.asarray(y_res, dtype=float).ravel(), np.asarray(t_res, dtype=float).ravel()
+    except (AttributeError, ValueError):
+        pass
+    from sklearn.model_selection import cross_val_predict
+
+    XW = X if W is None else np.column_stack([X, W])
+    y_hat = cross_val_predict(_default_nuisance(random_state), XW, y, cv=splitter, groups=groups)
+    t_hat = cross_val_predict(_default_nuisance(random_state + 1), XW, t, cv=splitter, groups=groups)
+    return y - y_hat, t - t_hat
+
+
+def _standardize(moderators: pd.DataFrame) -> np.ndarray:
     X = moderators.to_numpy(dtype=float)
     means = X.mean(axis=0)
     stds = X.std(axis=0, ddof=1)
     stds[stds == 0] = 1.0
-    Z = (X - means) / stds
-    design = sm.add_constant(Z)
-    model = sm.OLS(cate, design)
+    return (X - means) / stds
+
+
+def _cluster_or_hc1(model, groups):
     if groups is not None and len(np.unique(groups)) > 1:
-        fit = model.fit(cov_type="cluster", cov_kwds={"groups": np.asarray(groups)})
-        cov_kind = "cluster"
-    else:
-        fit = model.fit(cov_type="HC1")
-        cov_kind = "HC1"
+        return model.fit(cov_type="cluster", cov_kwds={"groups": np.asarray(groups)}), "cluster"
+    return model.fit(cov_type="HC1"), "HC1"
+
+
+def _coef_table(fit, names: list[str], cov_kind: str) -> pd.DataFrame:
     rows = [{"term": "intercept", "coef": float(fit.params[0]), "se": float(fit.bse[0])}]
-    for i, name in enumerate(moderators.columns):
-        rows.append(
-            {
-                "term": name,
-                "coef": float(fit.params[1 + i]),
-                "se": float(fit.bse[1 + i]),
-            }
-        )
+    for i, name in enumerate(names):
+        rows.append({"term": name, "coef": float(fit.params[1 + i]), "se": float(fit.bse[1 + i])})
     table = pd.DataFrame(rows)
     table["tstat"] = table["coef"] / table["se"]
     table.attrs["cov_type"] = cov_kind
+    return table
+
+
+def best_linear_projection(
+    y_res: np.ndarray,
+    t_res: np.ndarray,
+    moderators: pd.DataFrame,
+    groups: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Best linear projection of the treatment effect on standardised moderators.
+
+    Under the partially linear model Y = theta(X) T + g(X, W) + e, Robinson's
+    residualisation gives  Y_res = theta(X) T_res + e. Projecting theta(X) on
+    (1, Z) is therefore the regression
+
+        Y_res = a * T_res + sum_j b_j * (T_res * Z_j) + u,
+
+    whose coefficients b_j are the BLP slopes and whose standard errors reflect
+    the sampling noise in the *data*. Regressing the forest's fitted CATEs on Z
+    instead (see ``naive_cate_projection``) treats those fitted values as if
+    they were observed without error and produces standard errors that are far
+    too small. Standard errors here are cluster-robust by firm when ``groups``
+    is supplied.
+    """
+    Z = _standardize(moderators)
+    t_res = np.asarray(t_res, dtype=float).ravel()
+    y_res = np.asarray(y_res, dtype=float).ravel()
+    interactions = Z * t_res[:, None]
+    design = np.column_stack([t_res, interactions])
+    # The intercept-free form is exact under the model, but a constant absorbs
+    # any residual mean left by imperfect cross-fitting; it is reported as
+    # "intercept" for the table layout and is not a BLP coefficient.
+    design = sm.add_constant(design, has_constant="add")
+    fit, cov_kind = _cluster_or_hc1(sm.OLS(y_res, design), groups)
+    names = ["treatment_mean"] + list(moderators.columns)
+    table = _coef_table(fit, names, cov_kind)
+    table.attrs["method"] = "residual_interaction"
+    return table
+
+
+def naive_cate_projection(
+    cate: np.ndarray, moderators: pd.DataFrame, groups: np.ndarray | None = None
+) -> pd.DataFrame:
+    """OLS of fitted CATEs on standardised moderators. Kept for comparison only:
+    its standard errors ignore estimation error in the CATEs and understate
+    uncertainty, sometimes by an order of magnitude."""
+    design = sm.add_constant(_standardize(moderators))
+    fit, cov_kind = _cluster_or_hc1(sm.OLS(cate, design), groups)
+    table = _coef_table(fit, list(moderators.columns), cov_kind)
+    table.attrs["method"] = "cate_on_moderators"
     return table
 
 
