@@ -1,20 +1,13 @@
-"""Stock splits, and applying them to a price series.
+"""Split adjustment, applied locally.
 
-FMP's price endpoints do not split-adjust. Both `historical-price-eod/full` and
-`historical-price-eod/dividend-adjusted` return the raw traded price, so a 2:1
-split reads as a -50% one-day return. Verified on AGN across its 2007-06-25
-split: the dividend-adjusted endpoint goes 114.47 to 58.00 overnight.
+Neither FMP price endpoint is split-adjusted, including the one called
+"dividend-adjusted" (checked on AGN's 2007-06-25 split: 114.47 to 58.00
+overnight). An unadjusted split inside an event window is a fabricated earnings
+reaction, and inside the 50-day volatility window it poisons the denominator for
+two months of events on that firm.
 
-For an event study that is not a cosmetic problem. An unadjusted split inside a
-reaction window fabricates a +-50% earnings reaction; inside a run-up or
-momentum window it corrupts the feature; and inside the 50-day window used for
-pre-event idiosyncratic volatility it corrupts the denominator that scales every
-reaction for that firm over a two-month stretch.
-
-The adjustment itself is arithmetic. A split with numerator `n` and denominator
-`d` (2:1 is n=2, d=1) multiplies the share count by n/d and divides the price by
-the same, so every price *strictly before* the split date is multiplied by d/n
-to put it on the post-split basis. Multiple splits compound.
+Prices strictly before a split date get multiplied by denominator/numerator;
+multiple splits compound.
 """
 from __future__ import annotations
 
@@ -40,11 +33,8 @@ def _to_float(value) -> float | None:
 
 
 def parse_splits(ticker: str, rows: list[dict], start_date: str) -> pd.DataFrame:
-    """Split events at or after ``start_date``.
-
-    A split before the sample start needs no handling: every price in the sample
-    is already on the post-split basis.
-    """
+    """Split events at or after ``start_date``. Earlier splits need no handling:
+    every price in the sample is already on the post-split basis."""
     start = pd.Timestamp(start_date).normalize()
     records: list[dict] = []
     for row in rows or []:
@@ -108,28 +98,20 @@ def harvest_splits(
     return combined
 
 
-# How far the observed price ratio may sit from its expected value and still be
-# recognised. A split day also carries ordinary price movement, so this has to
-# be loose enough to absorb that and tight enough to separate "halved" from
-# "continuous".
+# Loose enough to absorb ordinary movement on the split day, tight enough to
+# tell "halved" from "continuous".
 RATIO_TOLERANCE = 0.15
 
 
 def split_is_present(
     prices: pd.Series, split_date: pd.Timestamp, ratio: float
 ) -> tuple[bool, float | None]:
-    """Is the split visible as a jump in this price series, or already adjusted?
+    """Is the split visible as a jump, or has the vendor already adjusted it?
 
-    Vendors back-adjust inconsistently: FMP returns a raw traded price for some
-    symbols (verified on AGN across its 2007 split) and an already-adjusted one
-    for others, apparently depending on whether the name is still active.
-    Applying the factor to a series that is already adjusted introduces an
-    artifact instead of removing one, so each split event is checked against the
-    prices before it is applied.
-
-    Returns (present, observed_gross). ``present`` is True only when the jump is
-    actually there; an ambiguous series (a genuine large move on the split date)
-    returns False so that nothing is changed on a guess.
+    FMP back-adjusts some symbols and not others, so applying the factor blindly
+    introduces artifacts in the already-adjusted ones. Returns False for an
+    ambiguous series too (a real crash landing on a split date), so nothing is
+    changed on a guess.
     """
     before = prices.loc[prices.index < split_date]
     after = prices.loc[prices.index >= split_date]
@@ -146,12 +128,8 @@ def split_is_present(
 
 
 def split_factors(splits: pd.DataFrame, dates: pd.DatetimeIndex, ticker: str) -> np.ndarray:
-    """Cumulative adjustment factor per date for one ticker.
-
-    The factor for date t is the product of d/n over every split strictly after
-    t, so prices before a 2:1 split are halved and prices from the split date
-    onward are untouched.
-    """
+    """Cumulative adjustment factor per date: the product of denominator/numerator
+    over every split strictly after that date."""
     factors = np.ones(len(dates), dtype=float)
     if splits.empty:
         return factors
@@ -163,8 +141,7 @@ def split_factors(splits: pd.DataFrame, dates: pd.DatetimeIndex, ticker: str) ->
 
 
 def adjust_for_splits(prices: pd.DataFrame, splits: pd.DataFrame) -> pd.DataFrame:
-    """Return ``prices`` with ``adj_close`` (and ``close``) on a split-adjusted
-    basis, plus a ``split_adjusted`` flag naming which tickers were changed."""
+    """Prices on a split-adjusted basis, with a ``split_adjusted`` flag per row."""
     frame = prices.sort_values(["ticker", "date"]).copy()
     frame["split_adjusted"] = False
     if splits.empty:
@@ -216,10 +193,8 @@ def adjust_for_splits(prices: pd.DataFrame, splits: pd.DataFrame) -> pd.DataFram
         group["adj_close"] = group["adj_close"].to_numpy(dtype=float) * factors
         if "close" in group.columns:
             group["close"] = group["close"].to_numpy(dtype=float) * factors
-        # `volume` is deliberately left on its as-traded basis. A consistent
-        # adjustment would divide it by the same factor, but nothing in the
-        # project computes anything from volume, and rescaling it would make the
-        # stored figure disagree with every external source for no benefit.
+        # volume stays as-traded: nothing here computes anything from it, and
+        # rescaling would just make it disagree with every external source.
         group["split_adjusted"] = True
         changed += 1
         pieces.append(group)
@@ -242,16 +217,13 @@ def adjust_for_splits(prices: pd.DataFrame, splits: pd.DataFrame) -> pd.DataFram
 
 
 def verify_adjustment(prices: pd.DataFrame) -> int:
-    """Count remaining split-shaped daily returns after adjustment.
-
-    Zero is the target. A non-zero count means the split feed missed events, and
-    those returns are still fabricated reactions.
-    """
+    """Split-shaped returns still present after adjustment. Zero is the target;
+    a remainder means the feed missed events."""
     import logging as _logging
 
     from erl.events.returns import daily_returns, suspected_split_artifacts
 
-    # daily_returns runs the same screen and would log its warning a second time.
+    # daily_returns screens too, and would log the same warning twice.
     returns_logger = _logging.getLogger("erl.events.returns")
     previous = returns_logger.level
     returns_logger.setLevel(_logging.ERROR)
@@ -276,12 +248,11 @@ def verify_adjustment(prices: pd.DataFrame) -> int:
 
 
 def unexplained_artifacts(prices: pd.DataFrame, splits: pd.DataFrame) -> pd.DataFrame:
-    """Split-shaped returns that the splits feed does not account for.
+    """Split-shaped returns the feed does not account for.
 
-    Distinguishes two cases that a naive ticker-level merge conflates: a ticker
-    the feed covers but with no split near this date, and a ticker the feed does
-    not cover at all. The second is the more common one, since coverage of
-    delisted names is patchy.
+    Separates "covered ticker, no split near this date" from "ticker not in the
+    feed at all". A ticker-level merge conflates the two, and the second is the
+    common case since coverage of delisted names is patchy.
     """
     from erl.events.returns import daily_returns, suspected_split_artifacts
 
@@ -305,16 +276,12 @@ def unexplained_artifacts(prices: pd.DataFrame, splits: pd.DataFrame) -> pd.Data
 def suspicious_tickers(
     artifacts: pd.DataFrame, min_artifacts: int = 3
 ) -> pd.DataFrame:
-    """Tickers whose history contains several unexplained split-shaped moves.
+    """Tickers with several unexplained split-shaped moves.
 
-    One such move is usually a real crash or spike. Several on one ticker, at
-    ratios like 2:1 then 3:1 then 10:1 within months, is the signature of a
-    recycled ticker: a delisted company's price history spliced onto a different
-    company that later took the symbol. Returns computed across the join are
-    meaningless, and every feature built from them inherits that.
-
-    Flagged rather than dropped automatically, because the decision to exclude a
-    name from the sample belongs in the write-up, not in a silent filter.
+    One is usually a real crash. Several on one symbol at 2:1, 3:1 and 10:1
+    within months means a recycled ticker, with two companies' price history
+    spliced together and every return across the join meaningless. Flagged, not
+    dropped: excluding a name belongs in the write-up, not a silent filter.
     """
     if artifacts.empty:
         return pd.DataFrame(columns=["ticker", "artifacts", "first", "last", "ratios"])
@@ -347,12 +314,9 @@ def events_touched(
     lookback: int = 60,
     lookahead: int = 1,
 ) -> int:
-    """How many events have an artifact inside any window used to build them.
-
-    The reaction window is (0, +1) but `idio_vol` reaches back 60 trading days
-    and the run-ups 20 and 60, so a single bad return contaminates far more than
-    one event. This measures the exposure instead of guessing at it.
-    """
+    """Events with an artifact inside any window used to build them. The reaction
+    window is two days but `idio_vol` reaches back 60, so one bad return touches
+    far more than one event."""
     if panel.empty or artifacts.empty or "day0" not in panel.columns:
         return 0
     bad = artifacts.groupby("ticker")["date"].apply(list).to_dict()

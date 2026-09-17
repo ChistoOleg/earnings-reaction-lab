@@ -205,16 +205,13 @@ def _read(processed_dir, name: str) -> pd.DataFrame | None:
 
 
 def diagnostic_figures(processed_dir, figdir: Path) -> list[Path]:
-    """Figures for the data-quality and robustness work.
-
-    These carry the parts of the argument the original figures cannot: that
-    day 0 is aligned, that the honest standard errors differ from the naive ones
-    by an order of magnitude, that the regime break survives (or does not survive)
-    volatility standardisation, and where the survivorship gap sits.
-    """
+    """Figures for the data-quality and robustness work: that day 0 is aligned,
+    how far the honest standard errors sit from the naive ones, whether the
+    regime break survives volatility standardisation, and where the survivorship
+    gap falls."""
     written: list[Path] = []
 
-    # 10. Event-day alignment: the evidence that day0 is correct
+    # 10. Event-day alignment
     align = _read(processed_dir, "alignment_diagnostic.csv")
     if align is not None and {"rel_day", "mean_abs_ar"} <= set(align.columns):
         try:
@@ -232,7 +229,7 @@ def diagnostic_figures(processed_dir, figdir: Path) -> list[Path]:
         except Exception as exc:
             logger.warning("alignment figure skipped: %s", exc)
 
-    # 11. Honest vs naive confidence intervals on the same coefficients
+    # 11. Honest vs naive confidence intervals
     blp, naive = _read(processed_dir, "forest_blp.csv"), _read(processed_dir, "forest_blp_naive.csv")
     if blp is not None and naive is not None and "term" in blp.columns:
         try:
@@ -258,7 +255,7 @@ def diagnostic_figures(processed_dir, figdir: Path) -> list[Path]:
         except Exception as exc:
             logger.warning("honest-vs-naive figure skipped: %s", exc)
 
-    # 12. Regime effects, raw and volatility-standardised, side by side
+    # 12. Regime effects, raw and standardised
     raw = _read(processed_dir, "regime_stability.csv")
     adj = _read(processed_dir, "regime_stability_voladj.csv")
     if raw is not None and "effect" in raw.columns:
@@ -285,7 +282,7 @@ def diagnostic_figures(processed_dir, figdir: Path) -> list[Path]:
         except Exception as exc:
             logger.warning("regime figure skipped: %s", exc)
 
-    # 13. Rolling effect, raw vs standardised, on shared time axis
+    # 13. Rolling effect on a shared time axis
     roll = _read(processed_dir, "rolling_effect.csv")
     roll_adj = _read(processed_dir, "rolling_effect_voladj.csv")
     if roll is not None and roll_adj is not None:
@@ -313,7 +310,7 @@ def diagnostic_figures(processed_dir, figdir: Path) -> list[Path]:
         except Exception as exc:
             logger.warning("stability comparison figure skipped: %s", exc)
 
-    # 14. Where the survivorship gap sits
+    # 14. Survivorship coverage by era
     era = _read(processed_dir, "universe_coverage_by_era.csv")
     if era is not None and {"removal_year", "coverage"} <= set(era.columns):
         try:
@@ -342,7 +339,7 @@ def diagnostic_figures(processed_dir, figdir: Path) -> list[Path]:
         except Exception as exc:
             logger.warning("placeholder figure skipped: %s", exc)
 
-    # 16. Paired model comparison: the IC gap with its confidence interval
+    # 16. Paired model comparison
     significance = _read(processed_dir, "prediction_significance.csv")
     if significance is not None and {"ic_diff", "ic_ci_low"} <= set(significance.columns):
         try:

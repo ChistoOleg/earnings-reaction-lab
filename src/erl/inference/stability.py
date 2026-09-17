@@ -1,20 +1,13 @@
-"""Parameter stability of the surprise effect over time.
+"""Is the pooled surprise effect one relationship or an average of several?
 
-Every estimate elsewhere in this project pools 2015-2024 into one number. That
-is only meaningful if the reaction-to-surprise relationship is stable over the
-sample. It plausibly is not: the sample spans a zero-rate regime, the COVID
-volatility shock, the 2022 rate repricing, and a period of very high index
-concentration. A pooled coefficient across a break is an average of two
-different economies, and the clustered standard error around it understates
-nothing while the point estimate means less than it appears to.
+The sample spans the GFC, the zero-rate years, COVID and the 2022 repricing. A
+coefficient pooled across a break is an average of different economies, and it
+means less than its standard error suggests.
 
-Two tests are provided:
-
-- ``regime_stability``: interact the surprise with regime dummies and run a Wald
-  test that the interactions are jointly zero (a Chow test with two-way
-  clustered errors, so it does not assume homoskedasticity or independence).
-- ``rolling_effect``: the surprise coefficient on a rolling window, to see
-  whether any rejection is a discrete break or a drift.
+``regime_stability`` interacts the surprise with regime dummies and Wald-tests
+the interactions jointly (a Chow test, two-way clustered so it assumes neither
+homoskedasticity nor independence). ``rolling_effect`` shows whether a rejection
+is a discrete break or a drift.
 """
 from __future__ import annotations
 
@@ -28,14 +21,11 @@ from erl.inference.double_lasso import twoway_cluster_cov
 
 logger = logging.getLogger(__name__)
 
-# Defaults chosen from the macro record, not from looking at the outcome:
-# the GFC and its aftermath, the zero-rate years, the COVID shock, and the
-# post-2022 higher-rate regime. Breaks that fall outside the sample, or that
-# would leave a regime too small to estimate, are dropped automatically, so the
-# same list works whether the panel starts in 2005 or in 2015.
+# Taken from the macro record, not chosen by looking at the outcome. Breaks the
+# sample cannot support are dropped, so the same list works from 2005 or 2015.
 DEFAULT_BREAKS = ("2008-09-15", "2009-07-01", "2020-03-01", "2022-01-01")
 
-# A regime needs enough events for a clustered slope to mean anything.
+# Enough events for a clustered slope to mean anything.
 MIN_REGIME_EVENTS = 150
 
 
@@ -44,13 +34,12 @@ def applicable_breaks(
     breaks: tuple[str, ...] = DEFAULT_BREAKS,
     min_events: int = MIN_REGIME_EVENTS,
 ) -> tuple[str, ...]:
-    """Drop breaks that the sample cannot support.
+    """Drop breaks the sample cannot support.
 
-    A break before the first event or after the last one creates an empty
-    regime, which makes the design matrix singular and the Wald test
-    meaningless. A break that leaves fewer than ``min_events`` on either side
-    gives a slope with no power. Both are dropped, in order, so the surviving
-    breaks always partition the sample into estimable pieces.
+    A break outside the sample range creates an empty regime and a singular
+    design; one leaving fewer than ``min_events`` on either side gives a slope
+    with no power. Both go, so what survives partitions the sample into
+    estimable pieces.
     """
     stamps = pd.to_datetime(dates).sort_values()
     if stamps.empty:
@@ -103,11 +92,9 @@ def regime_stability(
 ) -> pd.DataFrame:
     """Chow-style test for a break in the surprise effect.
 
-    Estimates ``outcome = a + b*T + sum_k c_k*(T x regime_k) + regime FE +
-    controls`` with the first regime as the base level, then Wald-tests
-    ``c_1 = ... = c_K = 0`` using two-way (firm x quarter) clustered errors.
-    The returned table carries the per-regime effect (base + interaction) and
-    the joint test in ``.attrs``.
+    Fits ``outcome = a + b*T + sum_k c_k*(T x regime_k) + regime FE + controls``
+    and Wald-tests the interactions jointly with two-way clustered errors. The
+    table holds the per-regime effect; the joint test is in ``.attrs``.
     """
     controls = controls or []
     columns = list(
@@ -141,7 +128,7 @@ def regime_stability(
         indicator = (frame["regime"] == regime).to_numpy(dtype=float)
         blocks.append(d * indicator)
         names.append(f"{treatment}_x_{regime}")
-    for regime in others:  # regime fixed effects (level shifts)
+    for regime in others:  # regime fixed effects
         blocks.append((frame["regime"] == regime).to_numpy(dtype=float))
         names.append(f"fe_{regime}")
     for control in controls:
@@ -223,11 +210,8 @@ def rolling_effect(
     step: int = 50,
     cluster: str = "ticker",
 ) -> pd.DataFrame:
-    """Surprise coefficient on a rolling window of ``window`` events.
-
-    Univariate by design: the point is the time profile of the slope, and adding
-    controls that are themselves regime-dependent would confound it.
-    """
+    """Surprise coefficient on a rolling window. Univariate by design: controls
+    that are themselves regime-dependent would confound the time profile."""
     frame = (
         panel[[outcome, treatment, date_col, cluster]]
         .dropna()

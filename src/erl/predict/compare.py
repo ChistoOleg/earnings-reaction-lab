@@ -1,26 +1,16 @@
 """Is one model actually better out of sample, or is the gap noise?
 
-The prediction stage reports R-squared, MAE and rank-IC per model, and it is
-tempting to read the ordering off those three numbers. On a single test fold of
-a few hundred events that ordering is close to meaningless: the standard error
-of a Spearman correlation at n = 400 is roughly 0.05, so a rank-IC gap of 0.02
-carries no information at all. Claiming either that a model wins or that the
-models are "statistically indistinguishable" requires a test, and the models'
-predictions are highly correlated with each other, so it has to be a *paired*
-one.
+Reading the ordering off the metrics table is tempting and close to meaningless:
+at n = 400 the standard error of a Spearman correlation is about 0.05, so a
+rank-IC gap of 0.02 says nothing. Claiming a winner *or* claiming the models are
+indistinguishable needs a test, and since they predict the same events from the
+same features their errors are correlated, so it has to be paired.
 
-Two tests, both paired:
-
-- ``loss_differential_test``: the Diebold-Mariano idea applied to a panel.
-  Regress the per-event squared-error difference on a constant with
-  cluster-robust errors, clustering on the calendar quarter because events in
-  the same quarter share market-wide shocks. The constant is the mean loss
-  advantage and its t-statistic is the test.
-- ``rank_ic_difference_test``: a block bootstrap of the rank-IC gap, resampling
-  whole quarters rather than individual events so the cross-sectional
-  dependence within a quarter is preserved. Resampling events independently
-  would understate the standard error for exactly the same reason the naive
-  causal-forest projection did.
+``loss_differential_test`` is Diebold-Mariano for a panel: the per-event
+squared-error difference regressed on a constant, clustered by quarter because
+same-quarter events share market shocks. ``rank_ic_difference_test`` block
+bootstraps the rank-IC gap over whole quarters; resampling events independently
+would understate the error for the same reason the naive CATE projection does.
 """
 from __future__ import annotations
 
@@ -45,10 +35,7 @@ def loss_differential_test(
     dates: pd.Series,
     loss: str = "squared",
 ) -> dict[str, float]:
-    """Paired test of mean loss difference (a minus b).
-
-    A negative mean means model ``a`` has the lower loss, i.e. ``a`` is better.
-    """
+    """Paired test of mean loss difference (a minus b). Negative favours ``a``."""
     y_true = np.asarray(y_true, dtype=float)
     err_a = y_true - np.asarray(pred_a, dtype=float)
     err_b = y_true - np.asarray(pred_b, dtype=float)
@@ -88,11 +75,9 @@ def rank_ic_difference_test(
     n_boot: int = 2000,
     random_state: int = 7,
 ) -> dict[str, float]:
-    """Block bootstrap of the rank-IC difference (a minus b).
-
-    A positive mean means model ``a`` ranks events better. Quarters are
-    resampled with replacement; events within a quarter travel together.
-    """
+    """Block bootstrap of the rank-IC difference (a minus b); positive favours
+    ``a``. Quarters are resampled with replacement and events within a quarter
+    travel together."""
     y_true = np.asarray(y_true, dtype=float)
     pred_a = np.asarray(pred_a, dtype=float)
     pred_b = np.asarray(pred_b, dtype=float)
@@ -117,9 +102,7 @@ def rank_ic_difference_test(
     draws = draws[np.isfinite(draws)]
     if len(draws) == 0:
         return {"ic_diff": observed, "n_boot": 0}
-    # Two-sided bootstrap p-value for the null that the gap is zero, centred on
-    # the observed gap so the null distribution is the resampling distribution
-    # shifted to zero.
+    # Two-sided bootstrap p-value, centring the resampling distribution on zero.
     centred = draws - draws.mean()
     pvalue = float(np.mean(np.abs(centred) >= abs(observed)))
     return {
@@ -141,11 +124,8 @@ def compare_models(
     truth_col: str = "y_true",
     n_boot: int = 2000,
 ) -> pd.DataFrame:
-    """Paired comparisons of ``reference`` against each challenger.
-
-    ``frame`` holds one row per out-of-sample event with the truth and one
-    prediction column per model, named ``y_pred_<model>``.
-    """
+    """Paired comparisons of ``reference`` against each challenger. ``frame`` has
+    one row per out-of-sample event, with a ``y_pred_<model>`` column each."""
     rows: list[dict] = []
     y = frame[truth_col].to_numpy(dtype=float)
     ref = frame[f"y_pred_{reference}"].to_numpy(dtype=float)

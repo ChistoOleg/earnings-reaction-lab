@@ -17,14 +17,11 @@ def regression_metrics(
 ) -> dict[str, float]:
     """Out-of-sample metrics.
 
-    ``r2`` compares the model against the only benchmark actually available at
-    prediction time: the mean of the *training* data. Using the test fold's own
-    mean instead (the textbook in-sample formula) hands the benchmark
-    information the model never had, and on a period whose mean differs from the
-    training period it penalises a correct model. Where the training mean is not
-    supplied it falls back to the test mean and ``r2_benchmark`` records which
-    was used. ``r2_within`` always reports the test-mean version so the two are
-    comparable across runs.
+    ``r2`` benchmarks against the training mean, the only benchmark available at
+    prediction time. The textbook formula uses the test fold's own mean, which
+    hands it information the model never had and penalises a correct model when
+    the period means differ. ``r2_within`` keeps that version for comparison and
+    ``r2_benchmark`` records which was used.
     """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
@@ -49,12 +46,10 @@ def regression_metrics(
     }
 
 
-# The target is a two-day abnormal return stored as a decimal (0.01 = 1%).
-# LightGBM's leaf penalties (reg_alpha, reg_lambda) act on the gradient sums,
-# which are on the same scale as the target: with a target whose standard
-# deviation is ~0.03, an L1 penalty of 1 zeroes every leaf and the model
-# collapses to a near-constant. Fitting on percentage points keeps the penalty
-# search space meaningful. Predictions are converted back to decimals.
+# The target is a decimal return (0.01 = 1%) with sd around 0.03, and LightGBM's
+# leaf penalties act on the same scale, so an L1 of 1 zeroes every leaf and the
+# model collapses to a constant. Fitting on percentage points keeps the search
+# space meaningful; predictions are converted back.
 TARGET_SCALE = 100.0
 
 
@@ -77,17 +72,15 @@ def _make_model(params: dict, random_state: int):
         random_state=random_state,
         n_jobs=-1,
         verbosity=-1,
-        # subsample (bagging_fraction) is silently ignored unless bagging runs
-        # at least every subsample_freq iterations.
+        # subsample is silently ignored unless subsample_freq is set.
         subsample_freq=1,
         **params,
     )
 
 
 def _suggest_params(trial) -> dict:
-    # Search space sized for a panel of a few thousand events with ~10 features:
-    # shallow trees, leaves that must hold a meaningful number of events, and
-    # penalties on a percentage-point target scale.
+    # Sized for a few thousand events and ~10 features: shallow trees, leaves that
+    # hold a meaningful number of events, penalties on a percentage-point scale.
     return {
         "num_leaves": trial.suggest_int("num_leaves", 4, 31),
         "max_depth": trial.suggest_int("max_depth", 2, 6),
@@ -102,9 +95,8 @@ def _suggest_params(trial) -> dict:
 
 
 def feature_usage(model, features: list[str]) -> pd.DataFrame:
-    """How many splits and how much gain each feature received in the fitted
-    booster. A feature with zero splits was never used; a model where only one
-    feature has splits is a step function of that feature, not an ML model."""
+    """Splits and gain per feature. Zero splits means the feature was never used;
+    one feature with all the splits is a step function, not a model."""
     booster = model.booster_
     splits = booster.feature_importance(importance_type="split")
     gain = booster.feature_importance(importance_type="gain")
@@ -243,9 +235,7 @@ def train_gbm(
 def shap_importance(
     model, X: pd.DataFrame, max_rows: int = 2000, target_scale: float = TARGET_SCALE
 ) -> pd.DataFrame:
-    """Mean |SHAP| per feature, reported in the target's *original* units (the
-    model is fitted on target * target_scale, so raw SHAP values are divided
-    back)."""
+    """Mean |SHAP| per feature, converted back to the target's original units."""
     import shap
 
     sample = X if len(X) <= max_rows else X.sample(max_rows, random_state=7)

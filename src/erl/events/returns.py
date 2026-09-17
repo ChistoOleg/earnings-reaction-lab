@@ -7,15 +7,11 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Day-0 convention. Price data is close-to-close, so the first return that can
-# contain the announcement is:
-#   bmo / dmh  -> the announcement date itself (close(t-1) -> close(t))
-#   amc        -> the next trading day (close(t) -> close(t+1))
-#   unknown    -> the announcement date. The reaction window is (0, +1) precisely
-#                 so that it covers both cases when timing is unknown; shifting
-#                 unknown events forward instead makes the window start one day
-#                 *after* a before-open reaction and miss it entirely. That was
-#                 the source of the t-1 spike in the drift figure.
+# Returns are close-to-close, so the first return that can contain the
+# announcement is the announcement date for before-open reports and the next
+# trading day for after-close ones. Unknown timing is treated as same-day: the
+# (0, +1) window then covers either case, whereas shifting forward would start
+# the window a day after a before-open reaction and miss it.
 SAME_DAY_TIMES = {"bmo", "dmh", "unknown"}
 NEXT_DAY_TIMES = {"amc"}
 
@@ -39,15 +35,13 @@ def align_day0(
 ) -> pd.Timestamp | None:
     date = pd.Timestamp(announce_date).normalize()
     if len(calendar) == 0 or date < calendar[0]:
-        # The announcement predates the price history. searchsorted would return
-        # position 0 and silently map the event onto the first available trading
-        # day, which can be months or years later.
+        # searchsorted would return 0 and map the event onto the first available
+        # trading day, possibly years later.
         return None
     pos = int(calendar.searchsorted(date))
     if str(announce_time).lower() in NEXT_DAY_TIMES:
-        # After-close: reaction is in the next close-to-close return. If the
-        # announcement fell on a non-trading day, searchsorted already points at
-        # the next trading day and no further shift is needed.
+        # On a non-trading day searchsorted already points at the next session,
+        # so no further shift.
         if pos < len(calendar) and calendar[pos] == date:
             target = pos + 1
         else:
@@ -59,9 +53,8 @@ def align_day0(
     return calendar[target]
 
 
-# Only whole-number ratios: 1.5:1 and 2.5:1 splits are rare and their gross
-# ratios sit close enough to ordinary large moves in index levels (^VIX, ^TNX)
-# to generate false positives.
+# Whole-number ratios only: 1.5:1 and 2.5:1 are rare and sit too close to
+# ordinary large moves to separate cleanly.
 SPLIT_RATIOS = (2.0, 3.0, 4.0, 5.0, 10.0, 20.0)
 SPLIT_TOLERANCE = 0.015
 
@@ -71,17 +64,14 @@ def suspected_split_artifacts(
 ) -> pd.DataFrame:
     """Daily returns whose gross ratio is close to a common split ratio.
 
-    The price endpoint used by default (`historical-price-eod/full`) may return
-    only `close`, in which case `adj_close` falls back to the unadjusted close
-    and a 4:1 split shows up as a -75% one-day return. If such a day lands in an
-    event window it becomes a fake earnings reaction. This screen flags the
-    candidates so they can be inspected or the endpoint switched to the
-    dividend-adjusted one.
+    FMP prices are not split-adjusted, so a 4:1 split reads as -75%. Landing in
+    an event window, that becomes a fake earnings reaction. See harvest/splits.py
+    for the correction; this only flags candidates.
     """
     candidates = returns.loc[returns["ret"].abs() >= threshold]
     if skip_prefix:
-        # Index and volatility symbols are levels, not tradable prices: they are
-        # never split-adjusted and routinely move this much.
+        # Index levels are not tradable prices; they never split and routinely
+        # move this much.
         candidates = candidates.loc[~candidates["ticker"].str.startswith(skip_prefix)]
     frame = candidates.copy()
     if frame.empty:
@@ -100,8 +90,7 @@ def suspected_split_artifacts(
 def daily_returns(prices: pd.DataFrame) -> pd.DataFrame:
     frame = prices.sort_values(["ticker", "date"]).copy()
     frame["ret"] = frame.groupby("ticker")["adj_close"].pct_change()
-    # A gap in a ticker's price history turns one pct_change into a multi-day
-    # return. Flag the gaps rather than silently treating them as daily moves.
+    # A gap turns one pct_change into a multi-day return wearing a daily label.
     gap = frame.groupby("ticker")["date"].diff().dt.days
     frame["stale_days"] = gap
     out = frame.dropna(subset=["ret"])[["ticker", "date", "ret", "stale_days"]]

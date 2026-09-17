@@ -72,8 +72,7 @@ def train_linear_baselines(
     final_train, final_test = folds[-1]
     oos_frame = frame.iloc[final_test][[date_col]].copy()
     if "event_id" in frame.columns:
-        # Carried so the paired significance test can join on identity rather
-        # than on row position.
+        # So the paired test joins on identity, not row position.
         oos_frame["event_id"] = frame.iloc[final_test]["event_id"].to_numpy()
     if "ticker" in frame.columns:
         oos_frame["ticker"] = frame.iloc[final_test]["ticker"].to_numpy()

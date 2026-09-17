@@ -1,14 +1,11 @@
-"""Collect every computed result into one workbook and one text summary.
+"""Collect every result into one workbook and one text summary.
 
-The pipeline scatters its output across two dozen CSVs, which is right for
-reproducibility and wrong for reading. This module gathers them into a single
-`results.xlsx` (one sheet per CSV, plus a Summary sheet that pulls out the
-headline numbers) and a `results.md` that can be read in a terminal or pasted
-into a write-up.
+Two dozen CSVs is right for reproducibility and wrong for reading. This gathers
+them into `results.xlsx` (a sheet each, plus a Summary sheet with the headline
+numbers) and `results.md`.
 
-Nothing here computes anything. Every figure is read back from the CSVs the
-earlier stages wrote, and each Summary row names the file it came from, so a
-number in the workbook can always be traced to the stage that produced it.
+Nothing here computes anything: every figure is read back from a CSV an earlier
+stage wrote, and each Summary row names its source file.
 """
 from __future__ import annotations
 
@@ -20,8 +17,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Sheet order: the things a reader wants first, then supporting detail. Files
-# not listed still get a sheet, appended alphabetically after these.
+# What a reader wants first. Unlisted files still get a sheet, appended after.
 PREFERRED_ORDER = [
     "provenance",
     "split_adjustment",
@@ -55,7 +51,7 @@ INVALID_SHEET_CHARS = set(r"[]:*?/\\")
 
 
 def sheet_name(stem: str, taken: set[str]) -> str:
-    """Excel sheet names: 31 characters, no []:*?/\\, unique within a workbook."""
+    """Excel limits: 31 characters, no []:*?/\\, unique per workbook."""
     clean = "".join("_" if c in INVALID_SHEET_CHARS else c for c in stem)[:31]
     candidate = clean or "sheet"
     i = 2
@@ -99,14 +95,11 @@ def _row_where(table: pd.DataFrame | None, column: str, value) -> pd.DataFrame |
 
 
 def provenance_check(tables: dict[str, pd.DataFrame]) -> dict[str, object]:
-    """Do the harvest-derived and analysis-derived tables come from one run?
+    """Do the harvest and analysis tables come from the same run?
 
-    The processed directory is just a folder: a full-universe harvest followed by
-    an analysis that was never re-run leaves data-quality figures describing
-    54,000 events sitting next to results estimated on 2,000. Every number is
-    individually correct and the table as a whole is misleading. This compares
-    the ticker counts the harvest and panel stages recorded and reports a
-    mismatch rather than presenting the mixture silently.
+    The processed directory is just a folder. A full-universe harvest with a
+    stale analysis leaves data-quality figures for 54,000 events next to results
+    estimated on 2,000: every number correct, the table as a whole misleading.
     """
     harvest = tables.get("harvest_manifest")
     panel = tables.get("panel_manifest")
@@ -141,8 +134,8 @@ def headline_summary(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     def add(metric: str, value, source: str, note: str = "") -> None:
         rows.append({"metric": metric, "value": value, "source": source, "note": note})
 
-    # Provenance first: if the tables describe different runs, nothing below is
-    # safe to read as a single set of results.
+    # First: if the tables are from different runs, nothing below reads as one
+    # set of results.
     provenance = provenance_check(tables)
     add("Provenance of the tables below", provenance["status"],
         "harvest_manifest.csv, panel_manifest.csv", str(provenance["detail"]))
@@ -306,8 +299,8 @@ def headline_summary(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 def write_workbook(
     tables: dict[str, pd.DataFrame], path: str | Path, summary: pd.DataFrame | None = None
 ) -> Path:
-    """One sheet per result table, Summary first. Values only, no formulas:
-    these are computed research outputs, not a model to recalculate."""
+    """One sheet per table, Summary first. Values only, not formulas: these are
+    computed outputs, not a model to recalculate."""
     from openpyxl.styles import Alignment, Font
     from openpyxl.utils import get_column_letter
 
@@ -349,8 +342,7 @@ def write_workbook(
 def write_text_summary(
     tables: dict[str, pd.DataFrame], path: str | Path, summary: pd.DataFrame | None = None
 ) -> Path:
-    """Markdown version of the same content, for reading in a terminal or
-    pasting into a write-up."""
+    """Markdown version, for reading in a terminal or pasting into a write-up."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [

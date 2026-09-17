@@ -22,9 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def timing_coverage(events: pd.DataFrame) -> dict[str, float]:
-    """Share of events by announcement-time label. Logged so that a data source
-    that silently omits the time field (everything 'unknown') is visible rather
-    than quietly changing the alignment rule for the whole sample."""
+    """Share of events by announcement-time label. Logged because a source that
+    omits the field entirely changes the alignment rule for the whole sample."""
     counts = events["announce_time"].fillna("unknown").astype(str).str.lower()
     shares = counts.value_counts(normalize=True).to_dict()
     return {k: float(v) for k, v in shares.items()}
@@ -99,8 +98,7 @@ def build_panel(
     panel = add_price_features(panel, ctx)
     panel = add_idiosyncratic_vol(panel, ctx)
     panel = add_market_state(panel, ctx, vix_symbol, rate_symbol)
-    # Capture these now: pandas drops DataFrame.attrs across a merge, and
-    # merge_fundamentals is a merge, so reading them later returns nothing.
+    # Capture now: pandas drops attrs across the merge below.
     market_symbols = {
         key: panel.attrs.get(key)
         for key in ("vix_symbol_used", "rate_symbol_used")
@@ -125,7 +123,7 @@ def build_panel(
 
     leakage_checks(usable)
     diagnostic = check_alignment(usable, ctx)
-    # attrs must stay JSON-serialisable (pandas writes them into parquet metadata)
+    # Must stay JSON-serialisable: pandas writes attrs into parquet metadata.
     usable.attrs["alignment_diagnostic"] = diagnostic.to_dict("records")
     usable.attrs["alignment_peak_rel_day"] = diagnostic.attrs.get("peak_rel_day")
     return usable

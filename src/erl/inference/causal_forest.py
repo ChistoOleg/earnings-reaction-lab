@@ -68,8 +68,7 @@ def fit_causal_forest(
         cv=splitter,
         random_state=random_state,
     )
-    # cache_values keeps the cross-fitted nuisance residuals (Y - E[Y|X,W],
-    # T - E[T|X,W]) on the estimator; the best linear projection below needs them.
+    # cache_values keeps the nuisance residuals the BLP below needs.
     estimator.fit(y, t, X=X, W=W, groups=groups, cache_values=True)
     cate = np.asarray(estimator.effect(X)).ravel()
     ate = float(cate.mean())
@@ -107,9 +106,8 @@ def fit_causal_forest(
 
 
 def _nuisance_residuals(estimator, y, t, X, W, groups, splitter, random_state: int):
-    """Cross-fitted residuals of outcome and treatment. Taken from the fitted
-    estimator when available; otherwise recomputed with the same nuisance
-    models and the same grouped folds."""
+    """Cross-fitted outcome and treatment residuals, from the fitted estimator if
+    it cached them, otherwise recomputed on the same grouped folds."""
     try:
         y_res, t_res, _, _ = estimator.residuals_
         return np.asarray(y_res, dtype=float).ravel(), np.asarray(t_res, dtype=float).ravel()
@@ -155,27 +153,19 @@ def best_linear_projection(
 ) -> pd.DataFrame:
     """Best linear projection of the treatment effect on standardised moderators.
 
-    Under the partially linear model Y = theta(X) T + g(X, W) + e, Robinson's
-    residualisation gives  Y_res = theta(X) T_res + e. Projecting theta(X) on
-    (1, Z) is therefore the regression
-
-        Y_res = a * T_res + sum_j b_j * (T_res * Z_j) + u,
-
-    whose coefficients b_j are the BLP slopes and whose standard errors reflect
-    the sampling noise in the *data*. Regressing the forest's fitted CATEs on Z
-    instead (see ``naive_cate_projection``) treats those fitted values as if
-    they were observed without error and produces standard errors that are far
-    too small. Standard errors here are cluster-robust by firm when ``groups``
-    is supplied.
+    Under Y = theta(X)T + g(X,W) + e, Robinson residualisation gives
+    Y_res = theta(X)T_res + e, so the projection is the regression
+    Y_res = a*T_res + sum_j b_j*(T_res * Z_j) + u. Its standard errors reflect
+    noise in the data; see ``naive_cate_projection`` for why the obvious
+    alternative does not. Clustered by firm when ``groups`` is given.
     """
     Z = _standardize(moderators)
     t_res = np.asarray(t_res, dtype=float).ravel()
     y_res = np.asarray(y_res, dtype=float).ravel()
     interactions = Z * t_res[:, None]
     design = np.column_stack([t_res, interactions])
-    # The intercept-free form is exact under the model, but a constant absorbs
-    # any residual mean left by imperfect cross-fitting; it is reported as
-    # "intercept" for the table layout and is not a BLP coefficient.
+    # The constant absorbs any residual mean left by imperfect cross-fitting.
+    # It is not a BLP coefficient.
     design = sm.add_constant(design, has_constant="add")
     fit, cov_kind = _cluster_or_hc1(sm.OLS(y_res, design), groups)
     names = ["treatment_mean"] + list(moderators.columns)
@@ -187,9 +177,10 @@ def best_linear_projection(
 def naive_cate_projection(
     cate: np.ndarray, moderators: pd.DataFrame, groups: np.ndarray | None = None
 ) -> pd.DataFrame:
-    """OLS of fitted CATEs on standardised moderators. Kept for comparison only:
-    its standard errors ignore estimation error in the CATEs and understate
-    uncertainty, sometimes by an order of magnitude."""
+    """OLS of fitted CATEs on standardised moderators. For comparison only: fitted
+    CATEs are smooth functions of these same moderators, so the fit is nearly
+    perfect and the standard errors measure the forest's smoothness rather than
+    sampling uncertainty. Understates by 30x or more in practice."""
     design = sm.add_constant(_standardize(moderators))
     fit, cov_kind = _cluster_or_hc1(sm.OLS(cate, design), groups)
     table = _coef_table(fit, list(moderators.columns), cov_kind)

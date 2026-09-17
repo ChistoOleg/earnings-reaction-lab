@@ -36,19 +36,16 @@ def _looks_backfilled(
     revenue_actual: float | None,
     revenue_estimate: float | None,
 ) -> bool:
-    """True when the "estimate" is really the actual copied into the estimate field.
+    """True when the "estimate" is the actual copied into the estimate field.
 
-    Where no consensus existed, the feed fills the estimate with the reported
-    figure, which makes ``surprise`` exactly zero for reasons that have nothing
-    to do with the market being unsurprised. These rows cluster in the early
-    years of the sample, so leaving them in would load the earliest regime with
-    artificial zero-surprise events and corrupt any comparison across periods.
+    With no consensus available, the feed fills the estimate with the reported
+    figure and the surprise comes out exactly zero for reasons unrelated to
+    information. These cluster early, so leaving them in loads the first regime
+    with artificial zeros.
 
-    Revenue is the discriminating test: a real consensus revenue estimate is a
-    ten-digit number and will not equal the reported figure to the dollar, while
-    a copied placeholder matches exactly. An exact EPS match is not evidence on
-    its own, because analysts genuinely hit a cents-rounded EPS often, so it only
-    counts when revenue is unavailable to check.
+    Revenue is the discriminating test: a real ten-digit consensus will not match
+    the reported figure to the dollar. An exact EPS match proves nothing on its
+    own, since analysts hit a cents-rounded EPS fairly often.
     """
     if revenue_actual is not None and revenue_estimate is not None:
         return revenue_estimate == revenue_actual
@@ -144,11 +141,9 @@ def harvest_surprises(
 
 
 def backfill_rate_by_year(events: pd.DataFrame) -> pd.DataFrame:
-    """Share of events per year whose estimate is a copy of the actual.
-
-    Read this before setting the start date: the first year where the rate is
-    low is the first year in which a surprise variable means anything.
-    """
+    """Share of events per year whose estimate is a copy of the actual. Read it
+    before setting the start date: the first year with a low rate is the first
+    year a surprise variable means anything."""
     frame = events.copy()
     frame["year"] = pd.to_datetime(frame["announce_date"]).dt.year
     out = (

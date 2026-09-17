@@ -18,8 +18,8 @@ The repository is built so that each method appears only where its assumptions e
 keep, and the inference/prediction distinction is kept explicit throughout. The methodology
 is the deliverable as much as any single number.
 
-> **Status:** analytical pipeline implemented and unit-tested (112 tests, with simulation
-> ground-truths for every estimator) and run end-to-end on live data. The **Results**
+> **Status:** complete and run end-to-end on live data, with simulation ground-truths
+> behind every estimator. The **Results**
 > section reports the full run: 48,056 earnings events across 730 S&P 500 constituents,
 > October 2006 to September 2026, on point-in-time index membership. Data limitations are
 > quantified in *Data quality* rather than left as general caveats.
@@ -56,8 +56,8 @@ is the deliverable as much as any single number.
 - **Purged, embargoed walk-forward CV.** The drift label spans about a month, so naive
   k-fold puts training events whose label window overlaps the test period into the training
   set, which is lookahead leakage that inflates measured skill. Training events within a
-  purge window before each test block are dropped, and an embargo period after the block is
-  also excluded.
+  purge window before each test block are dropped. Training is always strictly earlier than
+  the test block, so the purge is what does the work.
 - **Standardized surprise (SUE), not raw %.** Raw surprise-percent explodes for near-zero
   EPS denominators; SUE scales by each firm's own past surprise volatility (using only
   prior quarters), which is both better-behaved and the literature standard.
@@ -129,16 +129,14 @@ src/erl/
   config.py            typed settings (ERL_ env prefix), data dirs, benchmarks
   fmp.py               rate-limit-aware, cached, resumable FMP client
   universe.py          point-in-time S&P 500 membership (survivorship handled)
-  harvest/             surprises, prices, fundamentals, transcripts
+  harvest/             prices (split-adjusted locally), surprises, fundamentals, splits
   events/              returns/CARs, feature engineering, panel + leakage guards
   export.py            consolidate every result into results.xlsx / results.md
-  harvest/             prices (split-adjusted locally), surprises, fundamentals, splits
   inference/           event study, double lasso, causal forest, stability tests
   predict/             purged CV, LightGBM+SHAP, FT-Transformer
   text/                transcript embedding + leakage-safe PCA features
   pipeline.py          end-to-end orchestrator (harvest -> panel -> inference -> predict)
 notebooks/             01..06, jupytext percent-format (open in Jupyter or VS Code)
-tests/                 112 tests; estimators verified against simulated ground truth
 ```
 
 ## Data

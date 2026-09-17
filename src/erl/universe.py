@@ -15,13 +15,9 @@ HISTORY_ENDPOINT = "/stable/historical-sp500-constituent"
 
 
 def _parse_date(record: dict) -> pd.Timestamp | None:
-    """Date of the membership change.
-
-    Only ``date`` is the change date. ``dateAdded`` is the date the *added*
-    security joined, which for a removal-only record is an unrelated, much
-    earlier date, so it must never be used as a fallback for the change date:
-    doing so would place a 2009 removal in 1957.
-    """
+    """Date of the membership change. Only ``date`` is that; ``dateAdded`` is when
+    the added security joined, which on a removal row is unrelated and much
+    earlier, so it is never a fallback."""
     value = record.get("date")
     if not value:
         return None
@@ -32,18 +28,11 @@ def _parse_date(record: dict) -> pd.Timestamp | None:
 def parse_change(record: dict) -> tuple[str, str]:
     """(added_ticker, removed_ticker) for one change-log record.
 
-    The payload uses ``symbol`` for the ticker that joined and
-    ``removedTicker``/``removedSecurity`` for the one that left, with
-    ``addedSecurity`` naming the joiner. A record can carry both (a straight
-    swap), only an addition, or only a removal.
-
-    The trap is a removal-only record: some rows repeat the departing ticker in
-    ``symbol`` while leaving ``addedSecurity`` blank. Reading ``symbol`` as the
-    joiner unconditionally then turns a removal into an addition, which in the
-    backward pass cancels itself out (discard then add) and in the forward pass
-    opens a fresh spell starting on the day the firm actually left the index.
-    ``symbol`` is therefore only treated as an addition when ``addedSecurity``
-    names something, or when there is no removal in the record at all.
+    ``symbol`` is the joiner and ``removedTicker`` the leaver; a row can carry
+    both, or either alone. The trap: some removal-only rows repeat the departing
+    ticker in ``symbol`` with ``addedSecurity`` blank. Reading that as an
+    addition cancels itself out in the backward pass and, in the forward pass,
+    opens a fresh spell on the day the firm actually left.
     """
     symbol = str(record.get("symbol") or "").strip().upper()
     removed = str(record.get("removedTicker") or "").strip().upper()
@@ -109,8 +98,7 @@ def build_membership(
             if removed in open_spells:
                 intervals.append((removed, open_spells.pop(removed), date))
             else:
-                # A removal with no open spell means the backward pass and the
-                # forward pass disagree about who was a member at `start`.
+                # The two passes disagree about who was a member at `start`.
                 unmatched_removals += 1
         if added and added not in open_spells:
             open_spells[added] = date
@@ -174,16 +162,12 @@ def membership_from_current(symbols: list[str]) -> pd.DataFrame:
 def membership_coverage(
     membership: pd.DataFrame, harvested: set[str] | list[str]
 ) -> pd.DataFrame:
-    """Did the data actually arrive for the names the universe says existed?
+    """Did data actually arrive for the names the universe says existed?
 
-    Reconstructing point-in-time membership correctly is only half of removing
-    survivorship bias. If the price endpoint returns nothing for a firm that was
-    delisted or acquired (Lehman, Washington Mutual, a firm taken private), that
-    firm silently disappears at the panel stage and the bias is back, now harder
-    to see because the universe step reported success. This compares the
-    universe against what was actually harvested, split by whether the name left
-    the index during the sample, and is the evidence for or against calling the
-    panel survivorship-bias-free.
+    Reconstructing membership is half the job. If prices come back empty for a
+    firm that was delisted or acquired, it vanishes at the panel stage and the
+    bias is back, harder to spot because the universe step reported success.
+    This is the evidence for or against calling the panel bias-free.
     """
     have = {str(t).strip().upper() for t in harvested}
     frame = membership.copy()
@@ -225,14 +209,11 @@ def membership_coverage(
 def coverage_by_era(
     membership: pd.DataFrame, harvested: set[str] | list[str]
 ) -> pd.DataFrame:
-    """Coverage of departed names by the year they left the index.
+    """Coverage of departed names by the year they left.
 
-    A single headline coverage figure hides where the gap sits. Firms that left
-    long ago are less likely to be retrievable, so the missing names concentrate
-    in the early sample, which means the residual survivorship bias is not
-    spread evenly across the panel: it falls hardest on exactly the regimes that
-    the stability analysis compares. Report this table alongside the headline
-    number so a reader can see which period is affected.
+    The headline figure hides where the gap sits. Older delistings are less
+    retrievable, so the missing names cluster early, which is one side of every
+    comparison the stability analysis makes. Report this next to the headline.
     """
     have = {str(t).strip().upper() for t in harvested}
     left = membership.loc[membership["removed_date"].notna()].copy()

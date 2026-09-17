@@ -53,12 +53,9 @@ def ar_path(
 ) -> pd.DataFrame:
     """Mean cumulative abnormal return by day relative to day 0.
 
-    With ``require_full_window`` (the default) only events that have a return on
-    every day of the window enter the average, so the cumulative path describes
-    one fixed cohort. Without it, events drop out as the window extends (a firm
-    delisted, a short price history) and the cumulated line mixes a changing
-    sample: a level change at day 12 can then be pure composition rather than
-    drift. The per-day count is returned as ``n`` either way.
+    ``require_full_window`` keeps one fixed cohort. Without it, events drop out
+    as the window extends and a level change at day 12 can be composition rather
+    than drift. Per-day counts come back as ``n`` either way.
     """
     start, end = rel_days
     rows: list[dict] = []
@@ -103,12 +100,11 @@ def alignment_diagnostic(
     ctx: ReturnContext,
     rel_days: tuple[int, int] = (-3, 3),
 ) -> pd.DataFrame:
-    """Mean |abnormal return| by day relative to day0, pooled over events.
+    """Mean |abnormal return| by day relative to day 0.
 
-    If day0 is aligned correctly the peak sits at 0 (before-open reports) or is
-    split between 0 and +1 (a mix of before-open and after-close reports). A
-    peak at -1 means day0 is one trading day late and the (0, +1) reaction
-    window is measuring the tail of the move rather than the move itself.
+    Aligned correctly, the peak sits at 0 or splits between 0 and +1. A peak at
+    -1 means day 0 is a day late and the window is measuring the tail of the
+    move rather than the move.
     """
     start, end = rel_days
     rows: list[dict] = []

@@ -40,15 +40,11 @@ def winsorize_asof(
     upper: float = 0.99,
     min_prior: int = 100,
 ) -> pd.Series:
-    """Point-in-time winsorisation: each event is clipped to quantiles computed
-    from events that occurred strictly *earlier*.
+    """Clip each event to quantiles computed from strictly earlier events.
 
-    Pooled winsorisation uses the whole sample's quantiles, which means an event
-    in 2017 is clipped using information from 2024. For the inference track that
-    is harmless (it is explicitly a full-sample estimate), but the prediction
-    track is evaluated out of time and must not see future data in any form,
-    including a clipping threshold. Events before ``min_prior`` prior
-    observations exist are left unclipped.
+    Pooled quantiles would clip a 2017 event using 2024 information. Harmless for
+    a full-sample estimate, not for anything evaluated out of time. Events with
+    fewer than ``min_prior`` predecessors are left unclipped.
     """
     frame = pd.DataFrame({"value": values, "date": pd.to_datetime(dates)})
     order = frame.sort_values("date", kind="stable").index
@@ -83,22 +79,15 @@ def add_sue(
     winsor: tuple[float, float] | None = (0.01, 0.99),
     winsor_mode: str = "asof",
 ) -> pd.DataFrame:
-    """Standardised unexpected earnings: surprise divided by the standard
-    deviation of the firm's *past* surprises (expanding window, at least
-    ``min_history`` prior quarters).
+    """Standardised unexpected earnings: the surprise over the standard deviation
+    of the firm's own past surprises.
 
-    The denominator can be tiny for firms whose past surprises were all close to
-    zero, which produces SUE values of +-20 or more. Quintile sorts are rank-based
-    and immune to that, but the OLS slope, the double lasso and the causal forest
-    all treat SUE as continuous, so a handful of such events would dominate them.
-    ``sue`` is therefore winsorised at the given quantiles; the untouched value is
-    kept in ``sue_raw``.
-
-    ``winsor_mode="asof"`` (the default) computes the clipping quantiles from
-    prior events only, so nothing downstream sees a threshold derived from future
-    data. ``winsor_mode="pooled"`` uses full-sample quantiles, which is
-    acceptable for the in-sample inference track but leaks into any out-of-time
-    evaluation.
+    That denominator goes near zero for firms whose past surprises were all tiny,
+    giving SUE values past +-20. Rank-based sorts do not care, but the continuous
+    estimators would be driven by a handful of events, so ``sue`` is winsorised
+    and ``sue_raw`` keeps the original. ``winsor_mode="asof"`` takes the quantiles
+    from prior events only; ``"pooled"`` uses the full sample, fine for in-sample
+    inference but leaky for anything evaluated out of time.
     """
     frame = events.sort_values(["ticker", "announce_date"]).copy()
     past_std = frame.groupby("ticker")["surprise"].transform(
@@ -158,12 +147,9 @@ def add_price_features(panel: pd.DataFrame, ctx: ReturnContext) -> pd.DataFrame:
         momentum_ab.append(ctx.car(row.ticker, row.day0, -252, -21))
     frame["runup_20d"] = runup20
     frame["runup_60d"] = runup60
-    # Two conventions, named explicitly. runup_20d/60d are market-adjusted
-    # (abnormal) returns, so a momentum feature built from raw returns is not
-    # comparable with them: "short-horizon run-up dampens, long-horizon momentum
-    # amplifies" would be partly a statement about market beta rather than about
-    # the firm. momentum_12_1 is the abnormal version, matching the run-ups;
-    # momentum_12_1_raw keeps the total-return version for reference.
+    # Both horizons market-adjusted so they are comparable: a raw-return momentum
+    # feature next to abnormal-return run-ups makes any contrast between them
+    # partly a statement about beta. The total-return version is kept alongside.
     frame["momentum_12_1_raw"] = momentum_raw
     frame["momentum_12_1"] = momentum_ab
     return frame
@@ -175,17 +161,12 @@ def add_idiosyncratic_vol(
     window: tuple[int, int] = (-60, -11),
     min_obs: int = 30,
 ) -> pd.DataFrame:
-    """Pre-event idiosyncratic volatility: std of daily abnormal returns over
-    ``window``, ending well before the announcement so the estimation window
-    cannot contain any of the reaction or the run-up into it.
+    """Standard deviation of daily abnormal returns over ``window``, which ends
+    well before day 0 so neither the reaction nor the run-up can inflate it.
 
-    This exists to test whether a change in the estimated surprise effect is a
-    change in pricing or just a change in volatility. SUE is on a fixed scale
-    but the reaction is not, so in a high-volatility period the same
-    informational surprise produces a mechanically larger abnormal return and
-    the regression coefficient rises without anything about price formation
-    having changed. Dividing the reaction by this quantity puts every event on
-    a comparable scale.
+    SUE is standardised by construction and the reaction is not, so a
+    high-volatility period produces larger raw reactions with no change in
+    pricing. Dividing by this puts every event on a comparable scale.
     """
     frame = panel.copy()
     start, end = window
@@ -208,12 +189,9 @@ def add_idiosyncratic_vol(
 def add_vol_adjusted_target(
     panel: pd.DataFrame, target: str = "car_reaction", floor_quantile: float = 0.01
 ) -> pd.DataFrame:
-    """``<target>_vol_adj`` = reaction divided by pre-event idiosyncratic vol.
-
-    The denominator is floored at its 1st percentile so a handful of unusually
-    quiet stocks cannot generate enormous standardised reactions, which would
-    reproduce the SUE-denominator problem one column over.
-    """
+    """Reaction divided by pre-event idiosyncratic volatility, with the denominator
+    floored at its 1st percentile so a few unusually quiet stocks do not recreate
+    the SUE-denominator problem one column over."""
     frame = panel.copy()
     if "idio_vol" not in frame.columns or target not in frame.columns:
         return frame
@@ -233,14 +211,12 @@ def add_vol_adjusted_target(
 
 
 def _first_available(ctx, candidates, label: str) -> str:
-    """First candidate symbol whose prices were actually harvested.
+    """First candidate whose prices actually arrived.
 
-    Index symbols such as ^TNX and ^VIX are gated behind higher data plans and
-    return 402 on lower ones, which silently leaves the corresponding feature
-    entirely NaN. Falling back to a liquid ETF proxy (IEF/TLT for the long end,
-    VIXY/VXX for volatility) keeps the feature alive on a restricted plan. The
-    proxy is a different quantity from the index level, so which symbol was used
-    is logged and recorded in the panel's attrs for the write-up.
+    ^TNX and ^VIX are gated behind higher data plans and 402 on lower ones, which
+    would leave the feature entirely NaN. An ETF proxy keeps it alive, but it is a
+    different quantity from the index level, so the symbol used is logged and
+    recorded for the write-up.
     """
     if isinstance(candidates, str):
         candidates = (candidates,)
@@ -291,16 +267,12 @@ def merge_fundamentals(
     fundamentals: pd.DataFrame,
     publication_lag_days: int = 90,
 ) -> pd.DataFrame:
-    """Attach the most recent fundamentals available *at the event*.
+    """Attach the most recent fundamentals actually available at the event.
 
-    The `date` on a key-metrics row is the fiscal period end, not the date the
-    figures became public. Matching an event to the latest period-end on or
-    before it therefore attaches numbers that had not yet been filed: a period
-    ending 31 March is typically published 60-90 days later, so an event in
-    mid-April would be given data from a report that did not exist. Every
-    fundamental row is shifted forward by ``publication_lag_days`` before the
-    as-of match; with annual data the cost is a staler figure, which is the
-    correct direction to err.
+    The key-metrics `date` is the fiscal period end, not the filing date, so
+    matching on it hands an April event figures from a report published in June.
+    Rows are shifted forward by ``publication_lag_days`` first; the cost is a
+    staler figure, which is the right direction to err.
     """
     if fundamentals is None or fundamentals.empty:
         frame = panel.copy()

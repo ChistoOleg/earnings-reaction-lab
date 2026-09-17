@@ -17,9 +17,8 @@ from erl.utils import read_parquet, write_parquet
 
 logger = logging.getLogger(__name__)
 
-# momentum_12_1 is the market-adjusted 12-1 return, matching the run-up features;
-# momentum_12_1_raw (total return) is built too but kept out of the model so the
-# two horizons are on the same footing.
+# momentum_12_1 is market-adjusted to match the run-ups; the total-return
+# version is built but kept out so the horizons are comparable.
 TABULAR_FEATURES = [
     "sue", "eps_beat", "both_beat", "prior_streak",
     "runup_20d", "runup_60d", "momentum_12_1",
@@ -128,16 +127,13 @@ def stage_harvest(mode: str = "pilot") -> None:
             settings.processed_dir / "estimate_backfill_by_year.csv", index=False
         )
     prices = harvest_prices(client, tickers + settings.benchmark_symbols, settings.start_date)
-    # FMP price endpoints are not split-adjusted (the dividend-adjusted one is
-    # not either), so a 2:1 split reads as a -50% daily return. Adjust before
-    # anything downstream computes a return from these prices.
+    # Neither price endpoint is split-adjusted, so adjust before anything
+    # downstream computes a return.
     from erl.harvest.splits import adjust_for_splits, harvest_splits, verify_adjustment
 
-    # Splits must be fetched for everything in the price frame, not just the
-    # equity universe. The ETF proxies split too: VIXY has reverse-split
-    # repeatedly, and an unadjusted reverse split would corrupt vix_level as a
-    # control. Index symbols (^GSPC, ^VIX) never split and are not tradable, so
-    # they are excluded rather than sent as doomed requests.
+    # Everything in the price frame, not just the equities: VIXY has
+    # reverse-split repeatedly. Index symbols never split, so they are skipped
+    # rather than sent as doomed requests.
     split_symbols = [
         s for s in dict.fromkeys(tickers + settings.benchmark_symbols)
         if not s.startswith("^")
@@ -181,7 +177,7 @@ def stage_harvest(mode: str = "pilot") -> None:
                          out_path=settings.interim_dir / "fundamentals.parquet")
     client.close()
 
-    # Did data actually arrive for the delisted names, or only the survivors?
+    # Did the delisted names actually arrive, or only the survivors?
     membership_path = settings.interim_dir / "membership.parquet"
     prices_path = settings.interim_dir / "prices.parquet"
     if membership_path.exists() and prices_path.exists():
@@ -286,7 +282,7 @@ def stage_inference() -> None:
         "selected_controls": ";".join(baseline.selected_controls),
     }]).to_csv(settings.processed_dir / "double_lasso_baseline.csv", index=False)
 
-    # Is that pooled number a single relationship or an average across regimes?
+    # One relationship, or an average across regimes?
     from erl.inference.stability import regime_stability, rolling_effect
 
     regimes = regime_stability(panel, "car_reaction", "sue", controls)
@@ -303,9 +299,8 @@ def stage_inference() -> None:
     if not rolling.empty:
         rolling.to_csv(settings.processed_dir / "rolling_effect.csv", index=False)
 
-    # Is a regime difference a change in pricing, or just a change in
-    # volatility? Re-run the same test on the vol-standardised reaction. If the
-    # break survives, it is not a volatility artifact.
+    # A change in pricing, or just in volatility? If the break survives
+    # standardisation it is not an artifact of scale.
     if "car_reaction_vol_adj" in panel.columns:
         adj_regimes = regime_stability(panel, "car_reaction_vol_adj", "sue", controls)
         if not adj_regimes.empty:
@@ -385,7 +380,7 @@ def stage_predict() -> None:
         comparison.to_string(index=False),
     )
 
-    # Is the ordering above real? The metrics alone cannot say.
+    # The metrics alone cannot say whether the ordering is real.
     from erl.predict.compare import compare_models
 
     paired = baseline.oos_predictions.copy()
@@ -455,9 +450,8 @@ STAGES = {
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    # httpx logs the full request URL at INFO, and the FMP key travels as a query
-    # parameter, so every line of a redirected log would contain the secret. A
-    # log file is the easiest way to leak a key into a git history.
+    # httpx logs full request URLs at INFO and the key travels as a query param,
+    # so a redirected log would carry the secret on every line.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(description="Earnings Reaction Lab pipeline")
